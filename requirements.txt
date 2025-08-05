@@ -1,0 +1,4 @@
+jdatetime==5.2.0
+PyQt6==6.9.1
+pyqt6_sip==13.10.2
+pywin32==311
