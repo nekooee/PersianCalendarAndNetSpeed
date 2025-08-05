@@ -1,3 +1,4 @@
 jdatetime==5.2.0
 PyQt6==6.9.1
 pywin32==311
+psutil==7.0.0

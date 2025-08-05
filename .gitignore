@@ -1,4 +1,3 @@
-/window_position.txt
 /main.py.bk2
 /main.py.bk
 /dist/
@@ -6,3 +5,4 @@
 /.venv/
 /icon.png
 /.idea/
+/config.txt

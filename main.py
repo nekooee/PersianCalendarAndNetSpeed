@@ -1,172 +1,453 @@
 import sys
-import jdatetime
 import os
 import signal
-from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QMenu, QVBoxLayout
-from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QFont, QAction
+from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
+                             QLabel, QDialog, QVBoxLayout, QPushButton)
+from PyQt6.QtCore import QTimer, Qt, QEvent, QUrl
+from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices
 
-# Windows-specific imports for direct window control
+import psutil
+
+# Import local widgets
+from widgets.calendar_widget import CalendarWidget
+from widgets.network_widget import NetworkWidget
+
+# Windows-specific imports for advanced functionality
 try:
     import win32gui
     import win32con
+    import win32com.client
+    import pythoncom
 
     IS_WINDOWS = True
 except ImportError:
     IS_WINDOWS = False
 
-# --- Constants ---
-DAYS_IN_PERSIAN = {
-    "Saturday": "شنبه", "Sunday": "یک‌شنبه", "Monday": "دوشنبه",
-    "Tuesday": "سه‌شنبه", "Wednesday": "چهارشنبه", "Thursday": "پنج‌شنبه",
-    "Friday": "جمعه"
+CONFIG_FILE = "config.txt"
+APP_ICON_PATH = "icon.ico"
+
+# Base stylesheet applied to all widgets. Font size will be added to this.
+BASE_STYLESHEET = """
+QWidget {
+    font-family: '%s';
 }
-WINDOW_POS_FILE = "window_position.txt"
-FONT_NAME = "IRANSansXFaNum"
-FONT_SIZE = 11
+"""
 
 
-class DateWidget(QWidget):
-    """A draggable, frameless widget to display the Persian date."""
+class MainWidget(QWidget):
+    """The main widget that manages and displays other widgets."""
 
-    def __init__(self):
+    def __init__(self, font_name: str):
         super().__init__()
+        self.font_name = font_name
+        self.font_size = 10
         self.old_pos = None
         self.menu_is_open = False
+        self.opacity_level = 0.6
+        self.is_currently_in_startup = self._is_in_startup()
+
+        if os.path.exists(APP_ICON_PATH):
+            self.app_icon = QIcon(APP_ICON_PATH)
+            self.setWindowIcon(self.app_icon)
+        else:
+            self.app_icon = QIcon()
+            print(f"Warning: Icon file not found at '{APP_ICON_PATH}'.")
+
+        self.load_config()
+        # Apply the font size loaded from config at startup
+        self.apply_global_font_size(self.font_size, initial=True)
         self.init_ui()
-        self.load_position()
+
+        # Add a timer to periodically ensure the widget stays on top
+        if IS_WINDOWS:
+            self.on_top_timer = QTimer(self)
+            self.on_top_timer.timeout.connect(self.periodic_on_top_check)
+            self.on_top_timer.start(1000)  # Check every 1 second
 
     def init_ui(self):
-        """Initializes the user interface of the widget."""
+        """Sets up the user interface."""
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool  # Prevents the app from appearing in the taskbar
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        self.background_widget = QWidget()
+        self.update_background_style()
 
-        self.label = QLabel()
-        font = QFont(FONT_NAME, FONT_SIZE)
-        self.label.setFont(font)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 0.01);
-            color: white;
-            padding: 10px;
-            border-radius: 8px;
-        """)
+        container_layout = QHBoxLayout(self.background_widget)
+        container_layout.setContentsMargins(10, 3, 10, 3)
+        container_layout.setSpacing(10)
 
-        layout.addWidget(self.label)
+        # No need to pass the font to child widgets as it's applied globally
+        self.calendar = CalendarWidget(parent=self)
+        self.network = NetworkWidget(parent=self)
 
-        self.update_time()
+        container_layout.addWidget(self.calendar, alignment=Qt.AlignmentFlag.AlignCenter)
+        container_layout.addWidget(self.network, alignment=Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.background_widget)
 
-        self.date_update_timer = QTimer(self)
-        self.date_update_timer.timeout.connect(self.update_time)
-        self.date_update_timer.start(60000)
+    def event(self, e: QEvent) -> bool:
+        """Handle window events, ensuring it stays on top when activated."""
+        if e.type() == QEvent.Type.WindowActivate:
+            if IS_WINDOWS and not self.menu_is_open:
+                self.ensure_on_top_windows()
+        return super().event(e)
 
-        if IS_WINDOWS:
-            self.keep_on_top_timer = QTimer(self)
-            self.keep_on_top_timer.timeout.connect(self.ensure_on_top_windows)
-            self.keep_on_top_timer.start(2000)
+    def periodic_on_top_check(self):
+        """Periodically ensures the window stays on top, unless a menu is open."""
+        if not self.menu_is_open:
+            self.ensure_on_top_windows()
 
     def ensure_on_top_windows(self):
-        """
-        Uses the Windows API to forcefully keep the window on top,
-        but only if the context menu is not open.
-        """
-        if self.menu_is_open:
+        """Uses win32gui to force the window to the topmost position."""
+        if not IS_WINDOWS:
             return
+        try:
+            hwnd = self.winId()
+            if hwnd:
+                win32gui.SetWindowPos(int(hwnd), win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                      win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+        except Exception:
+            # Fails silently if the window handle is not available yet
+            pass
 
-        hwnd = self.winId()
-        if hwnd:
-            win32gui.SetWindowPos(
-                hwnd,
-                win32con.HWND_TOPMOST,
-                0, 0, 0, 0,
-                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
-            )
-
-    def update_time(self):
-        """Updates the date and time text."""
-        now = jdatetime.datetime.now()
-        date_str = now.strftime("%Y/%m/%d")
-        day_str = DAYS_IN_PERSIAN[now.strftime("%A")]
-        self.label.setText(f"{day_str}\n{date_str}")
+    def update_background_style(self):
+        """Updates the background color and opacity."""
+        style = f"QWidget {{ background-color: rgba(20, 20, 20, {self.opacity_level}); border-radius: 8px; }}"
+        self.background_widget.setStyleSheet(style)
 
     def mousePressEvent(self, event):
+        """Captures the initial position for window dragging."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.old_pos = event.globalPosition().toPoint()
 
     def mouseMoveEvent(self, event):
+        """Moves the window based on mouse movement."""
         if self.old_pos:
             delta = event.globalPosition().toPoint() - self.old_pos
             self.move(self.x() + delta.x(), self.y() + delta.y())
             self.old_pos = event.globalPosition().toPoint()
 
     def mouseReleaseEvent(self, event):
+        """Saves config and resets position when mouse is released."""
         if event.button() == Qt.MouseButton.LeftButton:
-            self.save_position()
+            self.save_config()
             self.old_pos = None
 
+    def _center_dialog(self, dialog):
+        """Centers a given dialog on the primary screen."""
+        screen_geometry = QApplication.primaryScreen().geometry()
+        dialog.adjustSize()
+        dialog_size = dialog.geometry()
+        x = int(screen_geometry.center().x() - dialog_size.width() / 2)
+        y = int(screen_geometry.center().y() - dialog_size.height() / 2)
+        dialog.move(x, y)
+
+    def _show_error_message(self):
+        """Shows an error when the user tries to hide the last visible widget."""
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("توجه")
+        msg_box.setWindowIcon(self.app_icon)
+        msg_box.setText(
+            f"<div style='width: 450px;'><p style='font-size: 13pt;'>حداقل یک ویجت باید فعال باشد.</p></div>")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.NoButton)
+
+        ok_button = QPushButton("تأیید")
+        ok_button.clicked.connect(msg_box.accept)
+        msg_box.addButton(ok_button, QMessageBox.ButtonRole.AcceptRole)
+
+        self._center_dialog(msg_box)
+        msg_box.exec()
+
+    def _show_about_dialog(self):
+        """Displays the 'About' dialog with developer info and project link."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("درباره برنامه")
+        dialog.setWindowIcon(self.app_icon)
+
+        main_layout = QVBoxLayout()
+        label = QLabel()
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        label.setOpenExternalLinks(False)
+
+        html_content = f"""
+        <div style='width: 450px;'>
+            <p align="right" style="font-size:13pt;">برنامه نویس: آرمین نکوئی</p>
+            <p align="right" style="font-size:13pt;">لینک سورس پروژه در گیت‌هاب:</p>
+            <p align="left" style="font-size:11pt;"><a href='https://github.com/nekooee/PersianCalendarAndNetSpeed'>https://github.com/nekooee/PersianCalendarAndNetSpeed</a></p>
+        </div>
+        """
+        label.setText(html_content)
+
+        def open_link_and_close(link):
+            QDesktopServices.openUrl(QUrl(link))
+            dialog.accept()
+
+        label.linkActivated.connect(open_link_and_close)
+
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("تایید")
+        ok_button.clicked.connect(dialog.accept)
+        ok_button.setFixedWidth(100)
+
+        button_layout.addStretch()
+        button_layout.addWidget(ok_button)
+        button_layout.addStretch()
+
+        main_layout.addWidget(label)
+        main_layout.addLayout(button_layout)
+        dialog.setLayout(main_layout)
+
+        self._center_dialog(dialog)
+        dialog.exec()
+
+    def set_opacity(self, level: float):
+        """Sets the background opacity."""
+        self.opacity_level = level
+        self.update_background_style()
+
+    def apply_global_font_size(self, size: int, initial: bool = False):
+        """Applies a global font size to the application using stylesheets."""
+        if not initial and size == self.font_size:
+            return
+
+        self.font_size = size
+        # Combine the base style with the new font size
+        font_stylesheet = f"font-size: {self.font_size}pt;"
+        final_stylesheet = (BASE_STYLESHEET % self.font_name) + " QWidget { " + font_stylesheet + " }"
+        QApplication.instance().setStyleSheet(final_stylesheet)
+
+        # Save config only if the change was manual
+        if not initial:
+            self.save_config()
+
+        # Readjust widget size to fit the new font
+        if hasattr(self, 'background_widget'):
+            self.background_widget.adjustSize()
+            self.adjustSize()
+
+    def _get_startup_shortcut_path(self):
+        """Gets the path for the application shortcut in the Windows Startup folder."""
+        if not IS_WINDOWS:
+            return None
+        startup_folder = os.path.join(os.environ['APPDATA'], 'Microsoft', 'Windows', 'Start Menu', 'Programs',
+                                      'Startup')
+        return os.path.join(startup_folder, "jalaliCalendarAndNetSpeed.lnk")
+
+    def _is_in_startup(self):
+        """Checks if the application is configured to run at startup."""
+        if not IS_WINDOWS:
+            return False
+        path = self._get_startup_shortcut_path()
+        return os.path.exists(path) if path else False
+
+    def _toggle_startup(self, checked: bool):
+        """Adds or removes the application from Windows startup."""
+        if not IS_WINDOWS:
+            return
+        try:
+            shortcut_path = self._get_startup_shortcut_path()
+            if checked:
+                target_path = os.path.abspath(sys.argv[0])
+                shell = win32com.client.Dispatch("WScript.Shell")
+                shortcut = shell.CreateShortCut(shortcut_path)
+                shortcut.Targetpath = sys.executable if target_path.lower().endswith('.py') else target_path
+                shortcut.Arguments = f'"{target_path}"' if target_path.lower().endswith('.py') else ''
+                shortcut.WorkingDirectory = os.path.dirname(target_path)
+                shortcut.IconLocation = os.path.abspath(APP_ICON_PATH) if os.path.exists(APP_ICON_PATH) else ''
+                shortcut.save()
+            elif os.path.exists(shortcut_path):
+                os.remove(shortcut_path)
+            self.is_currently_in_startup = checked
+        except Exception as e:
+            print(f"Error modifying startup settings: {e}")
+
+    def _toggle_calendar_visibility(self, visible):
+        """Shows or hides the calendar widget."""
+        if not visible and not self.network.isVisible():
+            if sender := self.sender(): sender.setChecked(True)
+            self._show_error_message()
+            return
+        self.calendar.setVisible(visible)
+        self.background_widget.adjustSize()
+        self.adjustSize()
+
+    def _toggle_network_visibility(self, visible):
+        """Shows or hides the network widget."""
+        if not visible and not self.calendar.isVisible():
+            if sender := self.sender(): sender.setChecked(True)
+            self._show_error_message()
+            return
+        self.network.setVisible(visible)
+        self.background_widget.adjustSize()
+        self.adjustSize()
+
     def contextMenuEvent(self, event):
-        """Shows a context menu and flags its state."""
+        """Creates and displays the right-click context menu."""
         context_menu = QMenu(self)
-        exit_action = QAction("Exit", self)
+        self.menu_is_open = True
+
+        show_calendar_action = QAction("نمایش تقویم", self, checkable=True)
+        show_calendar_action.setChecked(self.calendar.isVisible())
+        show_calendar_action.toggled.connect(self._toggle_calendar_visibility)
+        context_menu.addAction(show_calendar_action)
+
+        show_network_action = QAction("نمایش سرعت شبکه", self, checkable=True)
+        show_network_action.setChecked(self.network.isVisible())
+        show_network_action.toggled.connect(self._toggle_network_visibility)
+        context_menu.addAction(show_network_action)
+        context_menu.addSeparator()
+
+        font_menu = context_menu.addMenu("تغییر اندازه فونت")
+        for size in range(9, 17):
+            label = f"{size} pt (پیشفرض)" if size == 10 else f"{size} pt"
+            action = QAction(label, self, checkable=True)
+            action.setChecked(size == self.font_size)
+            action.triggered.connect(lambda checked, s=size: self.apply_global_font_size(s))
+            font_menu.addAction(action)
+
+        opacity_menu = context_menu.addMenu("تنظیم شفافیت")
+        opacities = {"0%": 0.01, "20%": 0.2, "40%": 0.4, "60%": 0.6, "80%": 0.8, "100%": 1.0}
+        for label_text, value in opacities.items():
+            display_label = f"{label_text} (پیشفرض)" if value == 0.6 else label_text
+            action = QAction(display_label, self, checkable=True)
+            action.setChecked(abs(value - self.opacity_level) < 0.01)
+            action.triggered.connect(lambda checked, v=value: self.set_opacity(v))
+            opacity_menu.addAction(action)
+
+        update_interval_menu = context_menu.addMenu("تنظیم زمان‌بندی به‌روزرسانی")
+        intervals = {"0.5 ثانیه": 500, "1 ثانیه": 1000, "1.5 ثانیه": 1500, "2 ثانیه": 2000, "2.5 ثانیه": 2500,
+                     "3 ثانیه": 3000}
+        current_interval = self.network.timer.interval()
+        for label_text, value in intervals.items():
+            # UPDATED: Added a Right-to-Left Mark (\u200f) to fix text rendering
+            rtl_mark = "\u200f"
+            display_label = f"{rtl_mark}(پیشفرض) {label_text}" if value == 1000 else f"{rtl_mark} {label_text}"
+            action = QAction(display_label, self, checkable=True)
+            action.setChecked(value == current_interval)
+            action.triggered.connect(lambda checked, v=value: self.network.set_update_interval(v))
+            update_interval_menu.addAction(action)
+
+        interface_menu = context_menu.addMenu("انتخاب اینترفیس شبکه")
+        try:
+            interfaces = psutil.net_if_addrs().keys()
+            for iface in interfaces:
+                action = QAction(iface, self, checkable=True)
+                action.setChecked(iface == self.network.interface)
+                action.triggered.connect(lambda checked, i=iface: self.network.set_interface(i))
+                interface_menu.addAction(action)
+        except Exception as e:
+            interface_menu.addAction(QAction(f"Error: {e}", self, enabled=False))
+        context_menu.addSeparator()
+
+        if IS_WINDOWS:
+            startup_action = QAction("اجرای خودکار هنگام شروع ویندوز", self, checkable=True)
+            startup_action.setChecked(self.is_currently_in_startup)
+            startup_action.toggled.connect(self._toggle_startup)
+            context_menu.addAction(startup_action)
+            context_menu.addSeparator()
+
+        about_action = QAction("درباره برنامه", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        context_menu.addAction(about_action)
+
+        exit_action = QAction("خروج", self)
         exit_action.triggered.connect(self.close)
         context_menu.addAction(exit_action)
 
-        self.menu_is_open = True
         context_menu.exec(event.globalPos())
         self.menu_is_open = False
+        self.save_config()
 
-    def save_position(self):
-        with open(WINDOW_POS_FILE, "w") as file:
-            file.write(f"{self.pos().x()} {self.pos().y()}")
+    def save_config(self):
+        """Saves widget settings to the config file."""
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                f.write(f"pos_x={self.pos().x()}\n")
+                f.write(f"pos_y={self.pos().y()}\n")
+                f.write(f"calendar_visible={self.calendar.isVisible()}\n")
+                f.write(f"network_visible={self.network.isVisible()}\n")
+                f.write(f"network_interface={self.network.interface or ''}\n")
+                f.write(f"opacity={self.opacity_level}\n")
+                f.write(f"network_interval={self.network.timer.interval()}\n")
+                f.write(f"font_size={self.font_size}\n")
+        except Exception as e:
+            print(f"Error saving config: {e}")
 
-    def load_position(self):
-        if os.path.exists(WINDOW_POS_FILE):
-            try:
-                with open(WINDOW_POS_FILE, "r") as file:
-                    pos = file.read().split()
-                    if len(pos) == 2:
-                        self.move(int(pos[0]), int(pos[1]))
-            except (ValueError, IndexError):
-                print("Could not load window position.")
+    def load_config(self):
+        """Loads widget settings from the config file."""
+        if not os.path.exists(CONFIG_FILE):
+            return
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = {k: v for k, v in (line.strip().split("=", 1) for line in f if "=" in line)}
+            self.move(int(config.get("pos_x", 100)), int(config.get("pos_y", 100)))
+            self.font_size = int(config.get("font_size", 10))
+            self.opacity_level = float(config.get("opacity", 0.6))
+
+            # Defer applying some configs until widgets are fully initialized
+            def apply_late_configs():
+                if not hasattr(self, 'calendar'):
+                    return
+                self.calendar.setVisible(config.get("calendar_visible", "True") == "True")
+                self.network.setVisible(config.get("network_visible", "True") == "True")
+                if config.get('network_interface'):
+                    self.network.set_interface(config['network_interface'])
+                interval = int(config.get("network_interval", 1000))
+                self.network.set_update_interval(interval)
+                self.update_background_style()
+                self.background_widget.adjustSize()
+                self.adjustSize()
+
+            QTimer.singleShot(10, apply_late_configs)
+        except Exception as e:
+            print(f"Error loading config: {e}")
 
     def closeEvent(self, event):
-        """Saves position and ensures the entire application quits."""
-        self.save_position()
-        # Explicitly quit the application's event loop
-        QApplication.instance().quit()
+        """Ensures config is saved on exit."""
+        self.save_config()
         super().closeEvent(event)
 
 
 def main():
-    """Main function to run the application."""
+    # It's good practice to initialize COM for win32com usage
+    if IS_WINDOWS:
+        pythoncom.CoInitialize()
 
-    # This pattern (signal handler + QTimer) is a standard workaround
-    # to ensure clean exit on Ctrl+C in IDEs.
+    # Gracefully handle termination signals
     def sigint_handler(*args):
         QApplication.quit()
 
     signal.signal(signal.SIGINT, sigint_handler)
-
     app = QApplication(sys.argv)
 
-    # This timer allows the Python interpreter to wake up and process signals.
-    timer = QTimer()
-    timer.start(100)
-    timer.timeout.connect(lambda: None)
+    font_name = "Vazirmatn FD"
+    try:
+        font_path = os.path.join("fonts", "Vazirmatn-FD-Regular.ttf")
+        if os.path.exists(font_path):
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            if font_id != -1:
+                font_name = QFontDatabase.applicationFontFamilies(font_id)[0]
+                print(f"Font '{font_name}' loaded successfully.")
 
-    widget = DateWidget()
+        # Set the base application stylesheet with the loaded font
+        app.setStyleSheet(BASE_STYLESHEET % font_name)
+
+    except Exception as e:
+        print(f"An unexpected error occurred while setting the font: {e}")
+
+    widget = MainWidget(font_name=font_name)
     widget.show()
 
-    exit_code = app.exec()
-    print("برنامه با موفقیت بسته شد.")
-    sys.exit(exit_code)
+    try:
+        sys.exit(app.exec())
+    finally:
+        if IS_WINDOWS:
+            pythoncom.CoUninitialize()
 
 
 if __name__ == '__main__':
