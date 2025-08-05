@@ -24,11 +24,11 @@ jobs:
           pip install pyinstaller PyQt6 jdatetime pywin32 pywin32-ctypes packaging psutil
 
       - name: Build EXE with PyInstaller
-        run: pyinstaller main.spec
+        run: pyinstaller --distpath dist/widget main.spec
 
       - name: Upload EXE to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/widget/JalaliCalendarAndNetSpeed.exe
+          files: dist/widget/jalaliCalendarAndNetSpeed.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
