@@ -41,19 +41,27 @@ class MainWidget(QWidget):
         self.opacity_level = 0.6
         self.is_currently_in_startup = self._is_in_startup()
 
-        if os.path.exists(APP_ICON_PATH):
-            self.app_icon = QIcon(APP_ICON_PATH)
+        # Correctly resolve paths for both bundled exe and normal script
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.abspath(".")
+
+        icon_full_path = os.path.join(base_path, APP_ICON_PATH)
+
+        if os.path.exists(icon_full_path):
+            self.app_icon = QIcon(icon_full_path)
             self.setWindowIcon(self.app_icon)
         else:
             self.app_icon = QIcon()
-            print(f"Warning: Icon file not found at '{APP_ICON_PATH}'.")
+            print(f"Warning: Icon file not found at '{icon_full_path}'.")
 
         self.load_config()
         self.apply_global_font_size(self.font_size, initial=True)
         self.init_ui()
 
         if IS_WINDOWS:
-            # Periodically force the window to stay on top.
+            # Periodically ensure the widget remains on top of other windows.
             self.on_top_timer = QTimer(self)
             self.on_top_timer.timeout.connect(self.periodic_on_top_check)
             self.on_top_timer.start(1000)
@@ -231,20 +239,28 @@ class MainWidget(QWidget):
         return os.path.exists(path) if path else False
 
     def _toggle_startup(self, checked: bool):
-        """Adds or removes the application from Windows startup."""
         if not IS_WINDOWS:
             return
         try:
             shortcut_path = self._get_startup_shortcut_path()
             if checked:
+                from win32com.client import gencache
+                if getattr(sys, 'frozen', False):
+                    base_path = sys._MEIPASS
+                else:
+                    base_path = os.path.abspath(".")
+
                 target_path = os.path.abspath(sys.argv[0])
-                shell = win32com.client.Dispatch("WScript.Shell")
-                shortcut = shell.CreateShortCut(shortcut_path)
-                shortcut.Targetpath = sys.executable if target_path.lower().endswith('.py') else target_path
+                icon_full_path = os.path.join(base_path, APP_ICON_PATH)
+
+                shell = gencache.EnsureDispatch('WScript.Shell')
+                shortcut = shell.CreateShortcut(shortcut_path)
+                shortcut.TargetPath = sys.executable if target_path.lower().endswith('.py') else target_path
                 shortcut.Arguments = f'"{target_path}"' if target_path.lower().endswith('.py') else ''
                 shortcut.WorkingDirectory = os.path.dirname(target_path)
-                shortcut.IconLocation = os.path.abspath(APP_ICON_PATH) if os.path.exists(APP_ICON_PATH) else ''
-                shortcut.save()
+                shortcut.IconLocation = icon_full_path if os.path.exists(icon_full_path) else ''
+                shortcut.Save()
+
             elif os.path.exists(shortcut_path):
                 os.remove(shortcut_path)
             self.is_currently_in_startup = checked
@@ -291,6 +307,12 @@ class MainWidget(QWidget):
     def load_config(self):
         """Loads settings from the config file on startup."""
         if not os.path.exists(CONFIG_FILE):
+            # On first run, position the widget at the bottom-left of the available screen area.
+            def set_initial_position():
+                screen_geometry = QApplication.primaryScreen().geometry()
+                self.move(screen_geometry.left() + 5, screen_geometry.bottom() - self.height() - 5)
+
+            QTimer.singleShot(0, set_initial_position)
             return
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
