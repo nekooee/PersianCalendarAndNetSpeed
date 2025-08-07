@@ -1,5 +1,5 @@
-# تقویم جلالی و سرعت شبکه برای نوار وظیفه در ویندوز
-## Jalali Calendar & Net Speed Tray Widget for Windows
+## نمایش تاریخ شمسی و سرعت شبکه روی نوار وظیفه(taskbar) در ویندوز
+### Jalali Calendar & Net Speed Tray Widget for Windows
 
 یک ویجت ساده، سبک و کاربردی برای نوار وظیفه (taskbar) ویندوز که تاریخ جلالی (شمسی) و سرعت لحظه‌ای آپلود و دانلود شبکه را
 نمایش می‌دهد.
@@ -83,3 +83,4 @@ cd PersianCalendarAndNetSpeed
 از مشارکت شما در این پروژه استقبال می‌شود. اگر ایده‌ای برای بهبود برنامه دارید یا با مشکلی مواجه شدید، لطفاً
 
 یک [Issue](https://github.com/nekooee/PersianCalendarAndNetSpeed/issues) جدید ثبت کنید یا از طریق [Pull Request](https://github.com/nekooee/PersianCalendarAndNetSpeed/pulls) تغییرات خود را ارسال نمایید.
+
