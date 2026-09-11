@@ -20,7 +20,7 @@ class CalendarWidget(QWidget):
 
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setStyleSheet("background-color: transparent; color: white;")
+        self.set_text_color("#FFFFFF")
 
         layout.addWidget(self.label)
 
@@ -44,3 +44,9 @@ class CalendarWidget(QWidget):
         # Using .get prevents an error if the day name isn't found
         day_str = days_in_persian.get(now.strftime("%A"), "")
         self.label.setText(f"{day_str}\n{date_str}")
+
+    def set_text_color(self, color: str):
+        """Applies the given text color to the date label."""
+        self.label.setStyleSheet(
+            f"background-color: transparent; color: {color};"
+        )

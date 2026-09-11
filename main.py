@@ -1,12 +1,14 @@
 import sys
 import os
+import json
 import signal
 import psutil
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
-                             QLabel, QDialog, QVBoxLayout, QPushButton)
+                             QLabel, QDialog, QVBoxLayout, QPushButton, QColorDialog,
+                             QFontDialog)
 from PyQt6.QtCore import QTimer, Qt, QUrl
-from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices
+from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont
 
 # --- Local Imports ---
 from widgets.calendar_widget import CalendarWidget
@@ -24,9 +26,96 @@ except ImportError:
     IS_WINDOWS = False
 
 # --- Constants ---
-CONFIG_FILE = "config.txt"
+APP_VERSION = "1.1.3"
 APP_ICON_PATH = "icon.ico"
+CONFIG_FILENAME = "config.json"
+LEGACY_CONFIG_FILENAME = "config.txt"
 BASE_STYLESHEET = "QWidget { font-family: '%s'; }"
+DEFAULT_TEXT_COLOR = "#FFFFFF"
+DEFAULT_BG_COLOR = "#141414"
+DEFAULT_FONT_SIZE = 10
+DEFAULT_OPACITY = 0.6
+DEFAULT_NETWORK_INTERVAL = 1000
+
+
+def get_app_base_path() -> str:
+    """Asset path for bundled resources (fonts/icon)."""
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.abspath(".")
+
+
+def get_config_dir() -> str:
+    """Directory where config.json should live (next to exe/script)."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_config_path(*, for_write: bool = False) -> str:
+    """Returns path for config.json. Writes always go next to the app."""
+    preferred = os.path.join(get_config_dir(), CONFIG_FILENAME)
+    if for_write or os.path.exists(preferred):
+        return preferred
+    cwd_json = os.path.join(os.path.abspath("."), CONFIG_FILENAME)
+    if os.path.exists(cwd_json) and os.path.normpath(cwd_json) != os.path.normpath(preferred):
+        return cwd_json
+    return preferred
+
+
+def get_legacy_config_path() -> str | None:
+    """Finds an old config.txt if present (for one-time migration)."""
+    candidates = [
+        os.path.join(get_config_dir(), LEGACY_CONFIG_FILENAME),
+        os.path.join(os.path.abspath("."), LEGACY_CONFIG_FILENAME),
+    ]
+    seen = set()
+    for path in candidates:
+        normalized = os.path.normpath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def load_legacy_txt_config(path: str) -> dict:
+    """Parses legacy key=value config.txt into a dict with typed values."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = {k: v for k, v in (line.strip().split("=", 1) for line in f if "=" in line)}
+
+    def as_bool(value, default=True):
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    config = {
+        "pos_x": int(raw.get("pos_x", 100)),
+        "pos_y": int(raw.get("pos_y", 100)),
+        "calendar_visible": as_bool(raw.get("calendar_visible"), True),
+        "network_visible": as_bool(raw.get("network_visible"), True),
+        "network_interface": raw.get("network_interface", "") or "",
+        "opacity": float(raw.get("opacity", DEFAULT_OPACITY)),
+        "network_interval": int(raw.get("network_interval", DEFAULT_NETWORK_INTERVAL)),
+        "font_size": int(raw.get("font_size", DEFAULT_FONT_SIZE)),
+        "font_name": raw.get("font_name") or None,
+        "text_color": raw.get("text_color", DEFAULT_TEXT_COLOR),
+        "bg_color": raw.get("bg_color", DEFAULT_BG_COLOR),
+    }
+    return config
+
+
+def resolve_default_font_name(fallback: str = "Vazirmatn FD") -> str:
+    """Loads the bundled Persian font when available and returns its family name."""
+    font_path = os.path.join(get_app_base_path(), "fonts", "Vazirmatn-FD-Regular.ttf")
+    if os.path.exists(font_path):
+        font_id = QFontDatabase.addApplicationFont(font_path)
+        if font_id != -1:
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            if families:
+                return families[0]
+    return fallback
 
 
 class MainWidget(QWidget):
@@ -35,18 +124,17 @@ class MainWidget(QWidget):
     def __init__(self, font_name: str):
         super().__init__()
         self.font_name = font_name
-        self.font_size = 10
+        self.font_size = DEFAULT_FONT_SIZE
+        self.text_color = DEFAULT_TEXT_COLOR
+        self.bg_color = DEFAULT_BG_COLOR
         self.old_pos = None
         self.menu_is_open = False
-        self.opacity_level = 0.6
+        self.opacity_level = DEFAULT_OPACITY
         self.is_currently_in_startup = self._is_in_startup()
+        self._pending_config = {}
 
         # Correctly resolve paths for both bundled exe and normal script
-        if getattr(sys, 'frozen', False):
-            base_path = sys._MEIPASS
-        else:
-            base_path = os.path.abspath(".")
-
+        base_path = get_app_base_path()
         icon_full_path = os.path.join(base_path, APP_ICON_PATH)
 
         if os.path.exists(icon_full_path):
@@ -57,8 +145,9 @@ class MainWidget(QWidget):
             print(f"Warning: Icon file not found at '{icon_full_path}'.")
 
         self.load_config()
-        self.apply_global_font_size(self.font_size, initial=True)
+        self.apply_global_font(initial=True)
         self.init_ui()
+        self._apply_pending_config()
 
         if IS_WINDOWS:
             # Periodically ensure the widget remains on top of other windows.
@@ -87,6 +176,7 @@ class MainWidget(QWidget):
 
         self.calendar = CalendarWidget(parent=self)
         self.network = NetworkWidget(parent=self)
+        self.apply_text_color()
 
         container_layout.addWidget(self.calendar, alignment=Qt.AlignmentFlag.AlignCenter)
         container_layout.addWidget(self.network, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -111,8 +201,19 @@ class MainWidget(QWidget):
 
     def update_background_style(self):
         """Updates the background color and opacity."""
-        style = f"QWidget {{ background-color: rgba(20, 20, 20, {self.opacity_level}); border-radius: 8px; }}"
+        color = QColor(self.bg_color)
+        style = (
+            f"QWidget {{ background-color: rgba({color.red()}, {color.green()}, "
+            f"{color.blue()}, {self.opacity_level}); border-radius: 8px; }}"
+        )
         self.background_widget.setStyleSheet(style)
+
+    def apply_text_color(self):
+        """Applies the current text color to calendar and network widgets."""
+        if hasattr(self, 'calendar'):
+            self.calendar.set_text_color(self.text_color)
+        if hasattr(self, 'network'):
+            self.network.set_text_color(self.text_color)
 
     # --- Event Handlers for Window Dragging ---
     def mousePressEvent(self, event):
@@ -147,31 +248,51 @@ class MainWidget(QWidget):
 
         context_menu.addSeparator()
 
-        font_menu = context_menu.addMenu("تغییر اندازه فونت")
+        appearance_menu = context_menu.addMenu("ظاهر")
+
+        text_color_action = QAction("رنگ متن…", self)
+        text_color_action.triggered.connect(self._choose_text_color)
+        appearance_menu.addAction(text_color_action)
+
+        bg_color_action = QAction("رنگ پس‌زمینه…", self)
+        bg_color_action.triggered.connect(self._choose_background_color)
+        appearance_menu.addAction(bg_color_action)
+
+        font_action = QAction("فونت…", self)
+        font_action.triggered.connect(self._choose_font)
+        appearance_menu.addAction(font_action)
+
+        appearance_menu.addSeparator()
+
+        font_menu = appearance_menu.addMenu("اندازه فونت")
         for size in range(9, 17):
-            label = f"{size} pt (پیشفرض)" if size == 10 else f"{size} pt"
+            label = f"{size} pt (پیشفرض)" if size == DEFAULT_FONT_SIZE else f"{size} pt"
             action = QAction(label, self, checkable=True)
             action.setChecked(size == self.font_size)
             action.triggered.connect(lambda checked, s=size: self.apply_global_font_size(s))
             font_menu.addAction(action)
 
-        opacity_menu = context_menu.addMenu("تنظیم شفافیت")
+        opacity_menu = appearance_menu.addMenu("شفافیت پس‌زمینه")
         opacities = {"0%": 0.01, "20%": 0.2, "40%": 0.4, "60%": 0.6, "80%": 0.8, "100%": 1.0}
         for label, value in opacities.items():
-            display_label = f"{label} (پیشفرض)" if value == 0.6 else label
+            display_label = f"{label} (پیشفرض)" if value == DEFAULT_OPACITY else label
             action = QAction(display_label, self, checkable=True)
             action.setChecked(abs(value - self.opacity_level) < 0.01)
             action.triggered.connect(lambda checked, v=value: self.set_opacity(v))
             opacity_menu.addAction(action)
 
+        reset_appearance_action = QAction("بازنشانی ظاهر", self)
+        reset_appearance_action.triggered.connect(self._reset_appearance)
+        appearance_menu.addAction(reset_appearance_action)
+
         update_interval_menu = context_menu.addMenu("تنظیم زمان‌بندی به‌روزرسانی")
         intervals = {"0.5 ثانیه": 500, "1 ثانیه": 1000, "1.5 ثانیه": 1500, "2 ثانیه": 2000, "2.5 ثانیه": 2500, "3 ثانیه": 3000}
         current_interval = self.network.timer.interval()
         for label, value in intervals.items():
-            display_label = f"\u200f(پیشفرض) {label}" if value == 1000 else f"\u200f {label}"
+            display_label = f"\u200f(پیشفرض) {label}" if value == DEFAULT_NETWORK_INTERVAL else f"\u200f {label}"
             action = QAction(display_label, self, checkable=True)
             action.setChecked(value == current_interval)
-            action.triggered.connect(lambda checked, v=value: self.network.set_update_interval(v))
+            action.triggered.connect(lambda checked, v=value: self._set_network_interval(v))
             update_interval_menu.addAction(action)
 
         interface_menu = context_menu.addMenu("انتخاب اینترفیس شبکه")
@@ -179,10 +300,16 @@ class MainWidget(QWidget):
             for iface in psutil.net_if_addrs().keys():
                 action = QAction(iface, self, checkable=True)
                 action.setChecked(iface == self.network.interface)
-                action.triggered.connect(lambda checked, i=iface: self.network.set_interface(i))
+                action.triggered.connect(lambda checked, i=iface: self._set_network_interface(i))
                 interface_menu.addAction(action)
         except Exception as e:
             interface_menu.addAction(QAction(f"Error: {e}", self, enabled=False))
+
+        context_menu.addSeparator()
+
+        reset_all_action = QAction("بازنشانی به تنظیمات پیش‌فرض", self)
+        reset_all_action.triggered.connect(self._reset_all_settings)
+        context_menu.addAction(reset_all_action)
 
         context_menu.addSeparator()
 
@@ -214,6 +341,7 @@ class MainWidget(QWidget):
         self.calendar.setVisible(visible)
         self.background_widget.adjustSize()
         self.adjustSize()
+        self.save_config()
 
     def _toggle_network_visibility(self, visible):
         """Shows or hides the network widget."""
@@ -225,6 +353,73 @@ class MainWidget(QWidget):
         self.network.setVisible(visible)
         self.background_widget.adjustSize()
         self.adjustSize()
+        self.save_config()
+
+    def _set_network_interface(self, interface_name: str):
+        """Sets the monitored network interface and persists the choice."""
+        self.network.set_interface(interface_name)
+        self.save_config()
+
+    def _set_network_interval(self, ms: int):
+        """Sets the network update interval and persists the choice."""
+        self.network.set_update_interval(ms)
+        self.save_config()
+
+    def _choose_text_color(self):
+        """Opens a color dialog for text color."""
+        initial = QColor(self.text_color)
+        color = QColorDialog.getColor(initial, self, "انتخاب رنگ متن")
+        if color.isValid():
+            self.text_color = color.name()
+            self.apply_text_color()
+            self.save_config()
+
+    def _choose_background_color(self):
+        """Opens a color dialog for background color."""
+        initial = QColor(self.bg_color)
+        color = QColorDialog.getColor(initial, self, "انتخاب رنگ پس‌زمینه")
+        if color.isValid():
+            self.bg_color = color.name()
+            self.update_background_style()
+            self.save_config()
+
+    def _choose_font(self):
+        """Opens a font dialog for family and size."""
+        current = QFont(self.font_name, self.font_size)
+        font, ok = QFontDialog.getFont(current, self, "انتخاب فونت")
+        if ok:
+            self.font_name = font.family()
+            self.font_size = font.pointSize() if font.pointSize() > 0 else DEFAULT_FONT_SIZE
+            self.apply_global_font()
+            self.save_config()
+
+    def _reset_appearance(self):
+        """Resets appearance settings to defaults."""
+        self.text_color = DEFAULT_TEXT_COLOR
+        self.bg_color = DEFAULT_BG_COLOR
+        self.opacity_level = DEFAULT_OPACITY
+        self.font_size = DEFAULT_FONT_SIZE
+        self.font_name = resolve_default_font_name(self.font_name)
+        self.apply_global_font()
+        self.apply_text_color()
+        self.update_background_style()
+        self.save_config()
+
+    def _reset_all_settings(self):
+        """Resets all app settings to factory defaults and saves them."""
+        self._reset_appearance()
+        self.calendar.setVisible(True)
+        self.network.setVisible(True)
+        self.network.set_update_interval(DEFAULT_NETWORK_INTERVAL)
+        default_iface = self.network.get_default_interface()
+        if default_iface:
+            self.network.set_interface(default_iface)
+        self.background_widget.adjustSize()
+        self.adjustSize()
+
+        screen_geometry = QApplication.primaryScreen().geometry()
+        self.move(screen_geometry.left() + 5, screen_geometry.bottom() - self.height() - 5)
+        self.save_config()
 
     def _get_startup_shortcut_path(self):
         """Gets the path for the application shortcut in the Windows Startup folder."""
@@ -245,10 +440,7 @@ class MainWidget(QWidget):
             shortcut_path = self._get_startup_shortcut_path()
             if checked:
                 from win32com.client import gencache
-                if getattr(sys, 'frozen', False):
-                    base_path = sys._MEIPASS
-                else:
-                    base_path = os.path.abspath(".")
+                base_path = get_app_base_path()
 
                 target_path = os.path.abspath(sys.argv[0])
                 icon_full_path = os.path.join(base_path, APP_ICON_PATH)
@@ -271,15 +463,21 @@ class MainWidget(QWidget):
         """Sets the background opacity."""
         self.opacity_level = level
         self.update_background_style()
+        self.save_config()
 
     def apply_global_font_size(self, size: int, initial: bool = False):
         """Applies a global font size to the application via stylesheets."""
         if not initial and size == self.font_size:
             return
-
         self.font_size = size
-        font_stylesheet = f"font-size: {self.font_size}pt;"
-        final_stylesheet = (BASE_STYLESHEET % self.font_name) + " QWidget { " + font_stylesheet + " }"
+        self.apply_global_font(initial=initial)
+
+    def apply_global_font(self, initial: bool = False):
+        """Applies the current font family and size globally."""
+        safe_family = self.font_name.replace("'", "\\'")
+        final_stylesheet = (
+            f"QWidget {{ font-family: '{safe_family}'; font-size: {self.font_size}pt; }}"
+        )
         QApplication.instance().setStyleSheet(final_stylesheet)
 
         if not initial:
@@ -290,53 +488,108 @@ class MainWidget(QWidget):
             self.adjustSize()
 
     def save_config(self):
-        """Saves current settings to the config file."""
+        """Saves current settings to config.json."""
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                f.write(f"pos_x={self.pos().x()}\n")
-                f.write(f"pos_y={self.pos().y()}\n")
-                f.write(f"calendar_visible={self.calendar.isVisible()}\n")
-                f.write(f"network_visible={self.network.isVisible()}\n")
-                f.write(f"network_interface={self.network.interface or ''}\n")
-                f.write(f"opacity={self.opacity_level}\n")
-                f.write(f"network_interval={self.network.timer.interval()}\n")
-                f.write(f"font_size={self.font_size}\n")
+            calendar_visible = self.calendar.isVisible() if hasattr(self, 'calendar') else True
+            network_visible = self.network.isVisible() if hasattr(self, 'network') else True
+            network_interface = ''
+            network_interval = DEFAULT_NETWORK_INTERVAL
+            if hasattr(self, 'network'):
+                network_interface = self.network.interface or ''
+                network_interval = self.network.timer.interval()
+
+            config = {
+                "pos_x": self.pos().x(),
+                "pos_y": self.pos().y(),
+                "calendar_visible": calendar_visible,
+                "network_visible": network_visible,
+                "network_interface": network_interface,
+                "opacity": self.opacity_level,
+                "network_interval": network_interval,
+                "font_size": self.font_size,
+                "font_name": self.font_name,
+                "text_color": self.text_color,
+                "bg_color": self.bg_color,
+            }
+            with open(get_config_path(for_write=True), "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Error saving config: {e}")
 
     def load_config(self):
-        """Loads settings from the config file on startup."""
-        if not os.path.exists(CONFIG_FILE):
-            # On first run, position the widget at the bottom-left of the available screen area.
+        """Loads settings from config.json (or migrates legacy config.txt)."""
+        config_path = get_config_path()
+        config = None
+
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except Exception as e:
+                print(f"Error loading config.json: {e}")
+        else:
+            legacy_path = get_legacy_config_path()
+            if legacy_path:
+                try:
+                    config = load_legacy_txt_config(legacy_path)
+                except Exception as e:
+                    print(f"Error migrating legacy config: {e}")
+
+        if not config:
             def set_initial_position():
                 screen_geometry = QApplication.primaryScreen().geometry()
                 self.move(screen_geometry.left() + 5, screen_geometry.bottom() - self.height() - 5)
 
             QTimer.singleShot(0, set_initial_position)
             return
+
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                config = {k: v for k, v in (line.strip().split("=", 1) for line in f if "=" in line)}
             self.move(int(config.get("pos_x", 100)), int(config.get("pos_y", 100)))
-            self.font_size = int(config.get("font_size", 10))
-            self.opacity_level = float(config.get("opacity", 0.6))
-
-            # Defer applying some configs until widgets are fully initialized.
-            def apply_late_configs():
-                if hasattr(self, 'calendar'):
-                    self.calendar.setVisible(config.get("calendar_visible", "True") == "True")
-                    self.network.setVisible(config.get("network_visible", "True") == "True")
-                    if config.get('network_interface'):
-                        self.network.set_interface(config['network_interface'])
-                    interval = int(config.get("network_interval", 1000))
-                    self.network.set_update_interval(interval)
-                    self.update_background_style()
-                    self.background_widget.adjustSize()
-                    self.adjustSize()
-
-            QTimer.singleShot(10, apply_late_configs)
+            self.font_size = int(config.get("font_size", DEFAULT_FONT_SIZE))
+            self.opacity_level = float(config.get("opacity", DEFAULT_OPACITY))
+            self.text_color = config.get("text_color", DEFAULT_TEXT_COLOR) or DEFAULT_TEXT_COLOR
+            self.bg_color = config.get("bg_color", DEFAULT_BG_COLOR) or DEFAULT_BG_COLOR
+            if config.get("font_name"):
+                self.font_name = config["font_name"]
+            self._pending_config = config
         except Exception as e:
-            print(f"Error loading config: {e}")
+            print(f"Error applying config: {e}")
+
+    def _as_bool(self, value, default=True):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _apply_pending_config(self):
+        """Applies settings that require widgets to already exist."""
+        config = self._pending_config
+        if not config:
+            return
+
+        self.calendar.setVisible(self._as_bool(config.get("calendar_visible"), True))
+        self.network.setVisible(self._as_bool(config.get("network_visible"), True))
+
+        saved_iface = str(config.get("network_interface", "") or "").strip()
+        if saved_iface:
+            available = set(psutil.net_if_addrs().keys())
+            if saved_iface in available:
+                self.network.set_interface(saved_iface)
+
+        try:
+            interval = int(config.get("network_interval", DEFAULT_NETWORK_INTERVAL))
+            self.network.set_update_interval(interval)
+        except (TypeError, ValueError):
+            pass
+
+        self.apply_text_color()
+        self.update_background_style()
+        self.background_widget.adjustSize()
+        self.adjustSize()
+        self._pending_config = {}
+        # Persist migrated settings immediately as JSON.
+        self.save_config()
 
     def _center_dialog(self, dialog):
         """Centers a given dialog on the primary screen."""
@@ -367,8 +620,9 @@ class MainWidget(QWidget):
         dialog.setWindowIcon(self.app_icon)
         main_layout = QVBoxLayout()
         label = QLabel(
-            """
+            f"""
             <div style='width: 450px;'>
+                <p align="right" style="font-size:13pt;">نسخه: {APP_VERSION}</p>
                 <p align="right" style="font-size:13pt;">برنامه نویس: آرمین نکوئی</p>
                 <p align="right" style="font-size:13pt;">لینک سورس پروژه در گیت‌هاب:</p>
                 <p align="left" style="font-size:11pt;"><a href='https://github.com/nekooee/PersianCalendarAndNetSpeed'>https://github.com/nekooee/PersianCalendarAndNetSpeed</a></p>
@@ -412,28 +666,13 @@ def main():
     signal.signal(signal.SIGINT, lambda *args: QApplication.quit())
 
     app = QApplication(sys.argv)
+    app.setApplicationVersion(APP_VERSION)
 
     font_name = "Vazirmatn FD"
     try:
-        # This block correctly resolves asset paths for both normal execution
-        # and a PyInstaller single-file bundle.
-        if getattr(sys, 'frozen', False):
-            base_path = sys._MEIPASS
-        else:
-            base_path = os.path.abspath(".")
-
-        font_path = os.path.join(base_path, "fonts", "Vazirmatn-FD-Regular.ttf")
-
-        if os.path.exists(font_path):
-            font_id = QFontDatabase.addApplicationFont(font_path)
-            if font_id != -1:
-                font_name = QFontDatabase.applicationFontFamilies(font_id)[0]
-                print(f"Font '{font_name}' loaded successfully.")
-        else:
-            print(f"Font file not found at: {font_path}")
-
+        font_name = resolve_default_font_name(font_name)
         app.setStyleSheet(BASE_STYLESHEET % font_name)
-
+        print(f"Font '{font_name}' ready.")
     except Exception as e:
         print(f"An unexpected error occurred while setting the font: {e}")
 

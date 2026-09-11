@@ -52,18 +52,15 @@ class NetworkWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        common_style = "background-color: transparent; color: white; padding: 0px 0px;"
-
         self.download_label = QLabel("↓ 0.0 KB/s")
-        self.download_label.setStyleSheet(common_style)
         self.download_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.upload_label = QLabel("↑ 0.0 KB/s")
-        self.upload_label.setStyleSheet(common_style)
         self.upload_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         layout.addWidget(self.download_label)
         layout.addWidget(self.upload_label)
+        self.set_text_color("#FFFFFF")
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_speed)
@@ -131,3 +128,9 @@ class NetworkWidget(QWidget):
         """Changes the speed update interval."""
         if self.timer:
             self.timer.start(ms)
+
+    def set_text_color(self, color: str):
+        """Applies the given text color to download/upload labels."""
+        style = f"background-color: transparent; color: {color}; padding: 0px;"
+        self.download_label.setStyleSheet(style)
+        self.upload_label.setStyleSheet(style)
