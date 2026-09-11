@@ -36,6 +36,8 @@ DEFAULT_BG_COLOR = "#141414"
 DEFAULT_FONT_SIZE = 10
 DEFAULT_OPACITY = 0.6
 DEFAULT_NETWORK_INTERVAL = 1000
+TRAY_HIDE_LABEL = "مخفی کردن در سینی سیستم"
+TRAY_START_HIDDEN_LABEL = "شروع در سینی سیستم (همراه ویندوز)"
 
 
 def get_app_base_path() -> str:
@@ -135,6 +137,7 @@ class MainWidget(QWidget):
         self._restore_pos = None
         self._is_quitting = False
         self.tray_icon = None
+        self.start_minimized_to_tray = False
 
         # Correctly resolve paths for both bundled exe and normal script
         base_path = get_app_base_path()
@@ -199,11 +202,12 @@ class MainWidget(QWidget):
         self._update_tray_tooltip()
 
         tray_menu = QMenu()
+        tray_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         show_action = QAction("نمایش ویجت", self)
         show_action.triggered.connect(self.restore_from_tray)
         tray_menu.addAction(show_action)
 
-        hide_action = QAction("مخفی کردن در System Tray", self)
+        hide_action = QAction(TRAY_HIDE_LABEL, self)
         hide_action.triggered.connect(self.minimize_to_tray)
         tray_menu.addAction(hide_action)
 
@@ -234,10 +238,11 @@ class MainWidget(QWidget):
     def minimize_to_tray(self):
         """Hides the widget and keeps the app running in the system tray."""
         if not self.tray_icon:
-            self._show_error_message("System Tray در این سیستم در دسترس نیست.")
+            self._show_error_message("سینی سیستم در این سیستم در دسترس نیست.")
             return
-        self._restore_pos = QPoint(self.pos())
-        self.save_config()
+        if self.isVisible():
+            self._restore_pos = QPoint(self.pos())
+            self.save_config()
         self.hide()
         if not self.tray_icon.isVisible():
             self.tray_icon.show()
@@ -324,6 +329,7 @@ class MainWidget(QWidget):
     def contextMenuEvent(self, event):
         """Creates and displays the right-click context menu."""
         context_menu = QMenu(self)
+        context_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.menu_is_open = True
 
         show_calendar_action = QAction("نمایش تقویم", self, checkable=True)
@@ -397,7 +403,7 @@ class MainWidget(QWidget):
 
         context_menu.addSeparator()
 
-        minimize_tray_action = QAction("مخفی کردن در System Tray", self)
+        minimize_tray_action = QAction(TRAY_HIDE_LABEL, self)
         minimize_tray_action.triggered.connect(self.minimize_to_tray)
         context_menu.addAction(minimize_tray_action)
 
@@ -412,6 +418,11 @@ class MainWidget(QWidget):
             startup_action.setChecked(self.is_currently_in_startup)
             startup_action.toggled.connect(self._toggle_startup)
             context_menu.addAction(startup_action)
+
+            start_in_tray_action = QAction(TRAY_START_HIDDEN_LABEL, self, checkable=True)
+            start_in_tray_action.setChecked(self.start_minimized_to_tray)
+            start_in_tray_action.toggled.connect(self._toggle_start_minimized_to_tray)
+            context_menu.addAction(start_in_tray_action)
             context_menu.addSeparator()
 
         about_action = QAction("درباره برنامه", self)
@@ -513,6 +524,7 @@ class MainWidget(QWidget):
 
         screen_geometry = QApplication.primaryScreen().geometry()
         self.move(screen_geometry.left() + 5, screen_geometry.bottom() - self.height() - 5)
+        self.start_minimized_to_tray = False
         self.save_config()
 
     def _get_startup_shortcut_path(self):
@@ -526,6 +538,11 @@ class MainWidget(QWidget):
         """Checks if the application is configured to run at startup."""
         path = self._get_startup_shortcut_path()
         return os.path.exists(path) if path else False
+
+    def _toggle_start_minimized_to_tray(self, checked: bool):
+        """Persists whether the app should launch hidden in the system tray."""
+        self.start_minimized_to_tray = checked
+        self.save_config()
 
     def _toggle_startup(self, checked: bool):
         if not IS_WINDOWS:
@@ -597,6 +614,7 @@ class MainWidget(QWidget):
             "font_name": self.font_name,
             "text_color": self.text_color,
             "bg_color": self.bg_color,
+            "start_minimized_to_tray": self.start_minimized_to_tray,
         }
         path = get_config_path(for_write=True)
         try:
@@ -647,6 +665,9 @@ class MainWidget(QWidget):
             self.bg_color = config.get("bg_color", DEFAULT_BG_COLOR) or DEFAULT_BG_COLOR
             if config.get("font_name"):
                 self.font_name = config["font_name"]
+            self.start_minimized_to_tray = self._as_bool(
+                config.get("start_minimized_to_tray"), False
+            )
             self._pending_config = config
         except Exception as e:
             print(f"Error applying config: {e}")
@@ -786,7 +807,10 @@ def main():
         print(f"An unexpected error occurred while setting the font: {e}")
 
     widget = MainWidget(font_name=font_name)
-    widget.show()
+    if widget.start_minimized_to_tray and widget.tray_icon:
+        widget.minimize_to_tray()
+    else:
+        widget.show()
 
     try:
         sys.exit(app.exec())
