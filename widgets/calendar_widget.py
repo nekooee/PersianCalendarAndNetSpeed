@@ -2,6 +2,24 @@ import jdatetime
 from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout
 from PyQt6.QtCore import Qt, QTimer
 
+DAYS_IN_PERSIAN = {
+    "Saturday": "شنبه", "Sunday": "یک‌شنبه", "Monday": "دوشنبه",
+    "Tuesday": "سه‌شنبه", "Wednesday": "چهارشنبه", "Thursday": "پنج‌شنبه",
+    "Friday": "جمعه"
+}
+
+
+def format_jalali_date(*, multiline: bool = True) -> str:
+    """Returns the current Jalali date string for display or tray tooltip."""
+    now = jdatetime.datetime.now()
+    date_str = now.strftime("%Y/%m/%d")
+    day_str = DAYS_IN_PERSIAN.get(now.strftime("%A"), "")
+    if multiline:
+        return f"{day_str}\n{date_str}"
+    if day_str:
+        return f"{day_str} {date_str}"
+    return date_str
+
 
 class CalendarWidget(QWidget):
     """A widget for displaying the Persian (Jalali) calendar date."""
@@ -33,17 +51,14 @@ class CalendarWidget(QWidget):
 
     def update_time(self):
         """Updates the date label with the current Persian date."""
-        # Weekday names are defined locally for a cleaner class scope
-        days_in_persian = {
-            "Saturday": "شنبه", "Sunday": "یک‌شنبه", "Monday": "دوشنبه",
-            "Tuesday": "سه‌شنبه", "Wednesday": "چهارشنبه", "Thursday": "پنج‌شنبه",
-            "Friday": "جمعه"
-        }
-        now = jdatetime.datetime.now()
-        date_str = now.strftime("%Y/%m/%d")
-        # Using .get prevents an error if the day name isn't found
-        day_str = days_in_persian.get(now.strftime("%A"), "")
-        self.label.setText(f"{day_str}\n{date_str}")
+        self.label.setText(format_jalali_date(multiline=True))
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_update_tray_tooltip"):
+            parent._update_tray_tooltip()
+
+    def get_date_tooltip(self) -> str:
+        """Single-line Jalali date suitable for tray tooltips."""
+        return format_jalali_date(multiline=False)
 
     def set_text_color(self, color: str):
         """Applies the given text color to the date label."""

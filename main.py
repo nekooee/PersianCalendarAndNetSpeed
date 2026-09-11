@@ -6,12 +6,12 @@ import psutil
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
                              QLabel, QDialog, QVBoxLayout, QPushButton, QColorDialog,
-                             QFontDialog)
-from PyQt6.QtCore import QTimer, Qt, QUrl
+                             QFontDialog, QSystemTrayIcon)
+from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint
 from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont
 
 # --- Local Imports ---
-from widgets.calendar_widget import CalendarWidget
+from widgets.calendar_widget import CalendarWidget, format_jalali_date
 from widgets.network_widget import NetworkWidget
 
 # --- Windows-specific Imports ---
@@ -132,6 +132,9 @@ class MainWidget(QWidget):
         self.opacity_level = DEFAULT_OPACITY
         self.is_currently_in_startup = self._is_in_startup()
         self._pending_config = {}
+        self._restore_pos = None
+        self._is_quitting = False
+        self.tray_icon = None
 
         # Correctly resolve paths for both bundled exe and normal script
         base_path = get_app_base_path()
@@ -148,6 +151,7 @@ class MainWidget(QWidget):
         self.apply_global_font(initial=True)
         self.init_ui()
         self._apply_pending_config()
+        self.init_tray()
         # Ensure config.json is created/updated as soon as the app is ready.
         QTimer.singleShot(0, self.save_config)
 
@@ -184,9 +188,92 @@ class MainWidget(QWidget):
         container_layout.addWidget(self.network, alignment=Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.background_widget)
 
+    def init_tray(self):
+        """Creates the system tray icon with tooltip and restore/exit actions."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("Warning: System tray is not available on this system.")
+            return
+
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.app_icon if not self.app_icon.isNull() else self.windowIcon())
+        self._update_tray_tooltip()
+
+        tray_menu = QMenu()
+        show_action = QAction("نمایش ویجت", self)
+        show_action.triggered.connect(self.restore_from_tray)
+        tray_menu.addAction(show_action)
+
+        hide_action = QAction("مخفی کردن در System Tray", self)
+        hide_action.triggered.connect(self.minimize_to_tray)
+        tray_menu.addAction(hide_action)
+
+        tray_menu.addSeparator()
+
+        exit_action = QAction("خروج", self)
+        exit_action.triggered.connect(self._quit_application)
+        tray_menu.addAction(exit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+        self.tray_tooltip_timer = QTimer(self)
+        self.tray_tooltip_timer.timeout.connect(self._update_tray_tooltip)
+        self.tray_tooltip_timer.start(60000)
+
+    def _update_tray_tooltip(self):
+        """Refreshes the tray icon tooltip with the current Jalali date."""
+        if not self.tray_icon:
+            return
+        if hasattr(self, 'calendar'):
+            tooltip = self.calendar.get_date_tooltip()
+        else:
+            tooltip = format_jalali_date(multiline=False)
+        self.tray_icon.setToolTip(tooltip)
+
+    def minimize_to_tray(self):
+        """Hides the widget and keeps the app running in the system tray."""
+        if not self.tray_icon:
+            self._show_error_message("System Tray در این سیستم در دسترس نیست.")
+            return
+        self._restore_pos = QPoint(self.pos())
+        self.save_config()
+        self.hide()
+        if not self.tray_icon.isVisible():
+            self.tray_icon.show()
+        self._update_tray_tooltip()
+
+    def restore_from_tray(self):
+        """Shows the widget again at its previous on-screen position."""
+        target = self._restore_pos
+        if target is None:
+            target = QPoint(self.pos().x(), self.pos().y())
+            if target.x() == 0 and target.y() == 0:
+                # Fall back to last saved config coordinates when available.
+                target = QPoint(int(getattr(self, '_saved_pos_x', 100)),
+                                int(getattr(self, '_saved_pos_y', 100)))
+
+        self.move(target)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.ensure_on_top_windows()
+        self.save_config()
+
+    def _on_tray_activated(self, reason):
+        """Handles tray icon clicks; double-click restores the widget."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            if self.isVisible():
+                self.minimize_to_tray()
+            else:
+                self.restore_from_tray()
+        elif reason == QSystemTrayIcon.ActivationReason.Trigger:
+            # Single left-click on Windows often maps to Trigger; keep tooltip-only.
+            pass
+
     def periodic_on_top_check(self):
-        """Ensures the window stays on top, unless a menu is open."""
-        if not self.menu_is_open:
+        """Ensures the window stays on top, unless a menu is open or hidden."""
+        if not self.menu_is_open and self.isVisible():
             self.ensure_on_top_windows()
 
     def ensure_on_top_windows(self):
@@ -230,6 +317,7 @@ class MainWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._restore_pos = QPoint(self.pos())
             self.save_config()
             self.old_pos = None
 
@@ -308,6 +396,10 @@ class MainWidget(QWidget):
             interface_menu.addAction(QAction(f"Error: {e}", self, enabled=False))
 
         context_menu.addSeparator()
+
+        minimize_tray_action = QAction("مخفی کردن در System Tray", self)
+        minimize_tray_action.triggered.connect(self.minimize_to_tray)
+        context_menu.addAction(minimize_tray_action)
 
         reset_all_action = QAction("بازنشانی به تنظیمات پیش‌فرض", self)
         reset_all_action.triggered.connect(self._reset_all_settings)
@@ -545,7 +637,10 @@ class MainWidget(QWidget):
             return
 
         try:
-            self.move(int(config.get("pos_x", 100)), int(config.get("pos_y", 100)))
+            self._saved_pos_x = int(config.get("pos_x", 100))
+            self._saved_pos_y = int(config.get("pos_y", 100))
+            self.move(self._saved_pos_x, self._saved_pos_y)
+            self._restore_pos = QPoint(self._saved_pos_x, self._saved_pos_y)
             self.font_size = int(config.get("font_size", DEFAULT_FONT_SIZE))
             self.opacity_level = float(config.get("opacity", DEFAULT_OPACITY))
             self.text_color = config.get("text_color", DEFAULT_TEXT_COLOR) or DEFAULT_TEXT_COLOR
@@ -649,16 +744,26 @@ class MainWidget(QWidget):
         """Stops all timers, saves config, and cleanly quits the application.
         This is connected to the 'Exit' action to ensure a clean shutdown.
         """
+        self._is_quitting = True
         self.network.timer.stop()
-        if IS_WINDOWS:
+        if hasattr(self, 'tray_tooltip_timer'):
+            self.tray_tooltip_timer.stop()
+        if IS_WINDOWS and hasattr(self, 'on_top_timer'):
             self.on_top_timer.stop()
+        if self.tray_icon:
+            self.tray_icon.hide()
         self.save_config()
         QApplication.instance().quit()
 
     def closeEvent(self, event):
-        """Persist settings even if the window is closed outside the Exit menu."""
-        self.save_config()
-        super().closeEvent(event)
+        """Minimize to tray instead of quitting, unless Exit was chosen."""
+        if self._is_quitting or not self.tray_icon:
+            self.save_config()
+            event.accept()
+            return
+        event.ignore()
+        self.minimize_to_tray()
+
 
 def main():
     # Initialize COM for win32com usage on Windows
@@ -670,6 +775,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationVersion(APP_VERSION)
+    app.setQuitOnLastWindowClosed(False)
 
     font_name = "Vazirmatn FD"
     try:
