@@ -201,29 +201,38 @@ class MainWidget(QWidget):
         self.tray_icon.setIcon(self.app_icon if not self.app_icon.isNull() else self.windowIcon())
         self._update_tray_tooltip()
 
-        tray_menu = QMenu()
-        tray_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        show_action = QAction("نمایش ویجت", self)
-        show_action.triggered.connect(self.restore_from_tray)
-        tray_menu.addAction(show_action)
+        self.tray_menu = QMenu()
+        self.tray_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.tray_menu.aboutToShow.connect(self._populate_tray_menu)
+        self._populate_tray_menu()
 
-        hide_action = QAction(TRAY_HIDE_LABEL, self)
-        hide_action.triggered.connect(self.minimize_to_tray)
-        tray_menu.addAction(hide_action)
-
-        tray_menu.addSeparator()
-
-        exit_action = QAction("خروج", self)
-        exit_action.triggered.connect(self._quit_application)
-        tray_menu.addAction(exit_action)
-
-        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
         self.tray_tooltip_timer = QTimer(self)
         self.tray_tooltip_timer.timeout.connect(self._update_tray_tooltip)
         self.tray_tooltip_timer.start(60000)
+
+    def _populate_tray_menu(self):
+        """Builds tray menu actions based on whether the widget is visible."""
+        if not hasattr(self, 'tray_menu') or self.tray_menu is None:
+            return
+        self.tray_menu.clear()
+
+        if self.isVisible():
+            hide_action = QAction(TRAY_HIDE_LABEL, self)
+            hide_action.triggered.connect(self.minimize_to_tray)
+            self.tray_menu.addAction(hide_action)
+        else:
+            show_action = QAction("نمایش ویجت", self)
+            show_action.triggered.connect(self.restore_from_tray)
+            self.tray_menu.addAction(show_action)
+
+        self.tray_menu.addSeparator()
+        exit_action = QAction("خروج", self)
+        exit_action.triggered.connect(self._quit_application)
+        self.tray_menu.addAction(exit_action)
 
     def _update_tray_tooltip(self):
         """Refreshes the tray icon tooltip with the current Jalali date."""
