@@ -148,6 +148,8 @@ class MainWidget(QWidget):
         self.apply_global_font(initial=True)
         self.init_ui()
         self._apply_pending_config()
+        # Ensure config.json is created/updated as soon as the app is ready.
+        QTimer.singleShot(0, self.save_config)
 
         if IS_WINDOWS:
             # Periodically ensure the widget remains on top of other windows.
@@ -488,33 +490,31 @@ class MainWidget(QWidget):
             self.adjustSize()
 
     def save_config(self):
-        """Saves current settings to config.json."""
+        """Saves current settings to config.json next to the app."""
+        config = {
+            "pos_x": self.pos().x(),
+            "pos_y": self.pos().y(),
+            "calendar_visible": self.calendar.isVisible() if hasattr(self, 'calendar') else True,
+            "network_visible": self.network.isVisible() if hasattr(self, 'network') else True,
+            "network_interface": (self.network.interface or '') if hasattr(self, 'network') else '',
+            "opacity": self.opacity_level,
+            "network_interval": (
+                self.network.timer.interval() if hasattr(self, 'network') else DEFAULT_NETWORK_INTERVAL
+            ),
+            "font_size": self.font_size,
+            "font_name": self.font_name,
+            "text_color": self.text_color,
+            "bg_color": self.bg_color,
+        }
+        path = get_config_path(for_write=True)
         try:
-            calendar_visible = self.calendar.isVisible() if hasattr(self, 'calendar') else True
-            network_visible = self.network.isVisible() if hasattr(self, 'network') else True
-            network_interface = ''
-            network_interval = DEFAULT_NETWORK_INTERVAL
-            if hasattr(self, 'network'):
-                network_interface = self.network.interface or ''
-                network_interval = self.network.timer.interval()
-
-            config = {
-                "pos_x": self.pos().x(),
-                "pos_y": self.pos().y(),
-                "calendar_visible": calendar_visible,
-                "network_visible": network_visible,
-                "network_interface": network_interface,
-                "opacity": self.opacity_level,
-                "network_interval": network_interval,
-                "font_size": self.font_size,
-                "font_name": self.font_name,
-                "text_color": self.text_color,
-                "bg_color": self.bg_color,
-            }
-            with open(get_config_path(for_write=True), "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
         except Exception as e:
-            print(f"Error saving config: {e}")
+            print(f"Error saving config to '{path}': {e}")
 
     def load_config(self):
         """Loads settings from config.json (or migrates legacy config.txt)."""
@@ -539,6 +539,7 @@ class MainWidget(QWidget):
             def set_initial_position():
                 screen_geometry = QApplication.primaryScreen().geometry()
                 self.move(screen_geometry.left() + 5, screen_geometry.bottom() - self.height() - 5)
+                self.save_config()
 
             QTimer.singleShot(0, set_initial_position)
             return
@@ -588,8 +589,6 @@ class MainWidget(QWidget):
         self.background_widget.adjustSize()
         self.adjustSize()
         self._pending_config = {}
-        # Persist migrated settings immediately as JSON.
-        self.save_config()
 
     def _center_dialog(self, dialog):
         """Centers a given dialog on the primary screen."""
@@ -656,6 +655,10 @@ class MainWidget(QWidget):
         self.save_config()
         QApplication.instance().quit()
 
+    def closeEvent(self, event):
+        """Persist settings even if the window is closed outside the Exit menu."""
+        self.save_config()
+        super().closeEvent(event)
 
 def main():
     # Initialize COM for win32com usage on Windows
