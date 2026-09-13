@@ -6,8 +6,9 @@ import psutil
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
                              QLabel, QDialog, QVBoxLayout, QPushButton, QColorDialog,
-                             QFontDialog, QSystemTrayIcon)
-from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint
+                             QFontDialog, QSystemTrayIcon, QProxyStyle, QStyle,
+                             QStyleOptionMenuItem)
+from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint, QRect
 from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont
 
 # --- Local Imports ---
@@ -30,7 +31,6 @@ APP_VERSION = "1.1.3"
 APP_ICON_PATH = "icon.ico"
 CONFIG_FILENAME = "config.json"
 LEGACY_CONFIG_FILENAME = "config.txt"
-BASE_STYLESHEET = "QWidget { font-family: '%s'; }"
 DEFAULT_TEXT_COLOR = "#FFFFFF"
 DEFAULT_BG_COLOR = "#141414"
 DEFAULT_FONT_SIZE = 10
@@ -38,6 +38,86 @@ DEFAULT_OPACITY = 0.6
 DEFAULT_NETWORK_INTERVAL = 1000
 TRAY_HIDE_LABEL = "مخفی کردن در سینی سیستم"
 TRAY_START_HIDDEN_LABEL = "شروع در سینی سیستم (همراه ویندوز)"
+
+# Submenu arrows must not overlap RTL text. Reserve space on both sides and
+# pin the arrow subcontrol to the right edge (same side as checkmarks).
+MENU_STYLESHEET = """
+QMenu {
+    padding: 4px;
+}
+QMenu::item {
+    padding: 6px 34px 6px 16px;
+}
+QMenu::indicator {
+    width: 14px;
+    height: 14px;
+    margin-right: 8px;
+    margin-left: 4px;
+}
+"""
+
+
+class MenuIndicatorStyle(QProxyStyle):
+    """Draws RTL submenu arrows on the right with a gap, like checkmarks."""
+
+    ARROW_SIZE = 8
+    ARROW_MARGIN = 10
+
+    def drawControl(self, element, option, painter, widget=None):
+        is_rtl_submenu = (
+            element == QStyle.ControlElement.CE_MenuItem
+            and isinstance(option, QStyleOptionMenuItem)
+            and option.menuItemType == QStyleOptionMenuItem.MenuItemType.SubMenu
+            and widget is not None
+            and widget.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        )
+        if not is_rtl_submenu:
+            return super().drawControl(element, option, painter, widget)
+
+        # Draw as a normal item so the style does not place a left-side arrow
+        # on top of Persian text, then paint the arrow on the right ourselves.
+        text_opt = QStyleOptionMenuItem(option)
+        text_opt.menuItemType = QStyleOptionMenuItem.MenuItemType.Normal
+        reserve = self.ARROW_SIZE + self.ARROW_MARGIN + 8
+        text_opt.rect = QRect(option.rect)
+        text_opt.rect.setWidth(max(0, option.rect.width() - reserve))
+        super().drawControl(element, text_opt, painter, widget)
+
+        arrow_opt = QStyleOptionMenuItem(option)
+        arrow_opt.rect = QRect(
+            option.rect.right() - self.ARROW_MARGIN - self.ARROW_SIZE,
+            option.rect.center().y() - self.ARROW_SIZE // 2,
+            self.ARROW_SIZE,
+            self.ARROW_SIZE,
+        )
+        self.proxy().drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorArrowLeft,
+            arrow_opt,
+            painter,
+            widget,
+        )
+
+
+# Keep a process-wide style instance so Qt does not garbage-collect it.
+MENU_STYLE = MenuIndicatorStyle()
+
+
+def build_app_stylesheet(font_name: str, font_size: int | None = None) -> str:
+    """Builds the global app stylesheet including RTL-safe menu arrow spacing."""
+    safe_family = font_name.replace("'", "\\'")
+    size_rule = f" font-size: {font_size}pt;" if font_size is not None else ""
+    return (
+        f"QWidget {{ font-family: '{safe_family}';{size_rule} }}\n"
+        f"{MENU_STYLESHEET}"
+    )
+
+
+def configure_menu(menu: QMenu) -> QMenu:
+    """Applies RTL direction, spacing, and right-side submenu arrows."""
+    menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    menu.setStyle(MENU_STYLE)
+    menu.setStyleSheet(MENU_STYLESHEET)
+    return menu
 
 
 def get_app_base_path() -> str:
@@ -201,8 +281,7 @@ class MainWidget(QWidget):
         self.tray_icon.setIcon(self.app_icon if not self.app_icon.isNull() else self.windowIcon())
         self._update_tray_tooltip()
 
-        self.tray_menu = QMenu()
-        self.tray_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.tray_menu = configure_menu(QMenu())
         self.tray_menu.aboutToShow.connect(self._populate_tray_menu)
         self._populate_tray_menu()
 
@@ -337,8 +416,7 @@ class MainWidget(QWidget):
 
     def contextMenuEvent(self, event):
         """Creates and displays the right-click context menu."""
-        context_menu = QMenu(self)
-        context_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        context_menu = configure_menu(QMenu(self))
         self.menu_is_open = True
 
         show_calendar_action = QAction("نمایش تقویم", self, checkable=True)
@@ -353,7 +431,7 @@ class MainWidget(QWidget):
 
         context_menu.addSeparator()
 
-        appearance_menu = context_menu.addMenu("ظاهر")
+        appearance_menu = configure_menu(context_menu.addMenu("ظاهر"))
 
         text_color_action = QAction("رنگ متن…", self)
         text_color_action.triggered.connect(self._choose_text_color)
@@ -369,7 +447,7 @@ class MainWidget(QWidget):
 
         appearance_menu.addSeparator()
 
-        font_menu = appearance_menu.addMenu("اندازه فونت")
+        font_menu = configure_menu(appearance_menu.addMenu("اندازه فونت"))
         for size in range(9, 17):
             label = f"{size} pt (پیشفرض)" if size == DEFAULT_FONT_SIZE else f"{size} pt"
             action = QAction(label, self, checkable=True)
@@ -377,7 +455,7 @@ class MainWidget(QWidget):
             action.triggered.connect(lambda checked, s=size: self.apply_global_font_size(s))
             font_menu.addAction(action)
 
-        opacity_menu = appearance_menu.addMenu("شفافیت پس‌زمینه")
+        opacity_menu = configure_menu(appearance_menu.addMenu("شفافیت پس‌زمینه"))
         opacities = {"0%": 0.01, "20%": 0.2, "40%": 0.4, "60%": 0.6, "80%": 0.8, "100%": 1.0}
         for label, value in opacities.items():
             display_label = f"{label} (پیشفرض)" if value == DEFAULT_OPACITY else label
@@ -390,7 +468,7 @@ class MainWidget(QWidget):
         reset_appearance_action.triggered.connect(self._reset_appearance)
         appearance_menu.addAction(reset_appearance_action)
 
-        update_interval_menu = context_menu.addMenu("تنظیم زمان‌بندی به‌روزرسانی")
+        update_interval_menu = configure_menu(context_menu.addMenu("تنظیم زمان‌بندی به‌روزرسانی"))
         intervals = {"0.5 ثانیه": 500, "1 ثانیه": 1000, "1.5 ثانیه": 1500, "2 ثانیه": 2000, "2.5 ثانیه": 2500, "3 ثانیه": 3000}
         current_interval = self.network.timer.interval()
         for label, value in intervals.items():
@@ -400,7 +478,7 @@ class MainWidget(QWidget):
             action.triggered.connect(lambda checked, v=value: self._set_network_interval(v))
             update_interval_menu.addAction(action)
 
-        interface_menu = context_menu.addMenu("انتخاب اینترفیس شبکه")
+        interface_menu = configure_menu(context_menu.addMenu("انتخاب اینترفیس شبکه"))
         try:
             for iface in psutil.net_if_addrs().keys():
                 action = QAction(iface, self, checkable=True)
@@ -594,11 +672,9 @@ class MainWidget(QWidget):
 
     def apply_global_font(self, initial: bool = False):
         """Applies the current font family and size globally."""
-        safe_family = self.font_name.replace("'", "\\'")
-        final_stylesheet = (
-            f"QWidget {{ font-family: '{safe_family}'; font-size: {self.font_size}pt; }}"
+        QApplication.instance().setStyleSheet(
+            build_app_stylesheet(self.font_name, self.font_size)
         )
-        QApplication.instance().setStyleSheet(final_stylesheet)
 
         if not initial:
             self.save_config()
@@ -810,7 +886,7 @@ def main():
     font_name = "Vazirmatn FD"
     try:
         font_name = resolve_default_font_name(font_name)
-        app.setStyleSheet(BASE_STYLESHEET % font_name)
+        app.setStyleSheet(build_app_stylesheet(font_name))
         print(f"Font '{font_name}' ready.")
     except Exception as e:
         print(f"An unexpected error occurred while setting the font: {e}")
