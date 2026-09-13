@@ -9,7 +9,10 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessage
                              QFontDialog, QSystemTrayIcon, QProxyStyle, QStyle,
                              QStyleOptionMenuItem, QStyleFactory)
 from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint, QRect
-from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont, QPixmap, QPainter
+from PyQt6.QtGui import (
+    QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont, QPixmap, QPainter,
+    QPen, QPainterPath, QPalette,
+)
 
 # --- Local Imports ---
 from widgets.calendar_widget import CalendarWidget, format_jalali_date, jalali_day_of_month
@@ -39,8 +42,8 @@ DEFAULT_NETWORK_INTERVAL = 1000
 TRAY_HIDE_LABEL = "مخفی کردن در سینی سیستم"
 TRAY_START_HIDDEN_LABEL = "شروع در سینی سیستم (همراه ویندوز)"
 
-# Hide native arrow glyphs (they sit on the text in RTL) and leave room on the
-# right for the custom arrow drawn by MenuIndicatorStyle.
+# Suppress native RTL submenu arrows (they overlap Persian text). Custom arrows
+# are painted on the right by MenuIndicatorStyle, next to the checkmark column.
 MENU_STYLESHEET = """
 QMenu {
     padding: 4px;
@@ -67,7 +70,7 @@ QMenu::right-arrow {
 
 
 class MenuIndicatorStyle(QProxyStyle):
-    """Draws RTL submenu arrows on the right with a gap, like checkmarks."""
+    """Draws visible RTL submenu chevrons on the right with a gap from text."""
 
     ARROW_SIZE = 8
     ARROW_MARGIN = 10
@@ -83,8 +86,8 @@ class MenuIndicatorStyle(QProxyStyle):
         if not is_rtl_submenu:
             return super().drawControl(element, option, painter, widget)
 
-        # Draw as a normal item so the base style does not place a left-side
-        # arrow on Persian text, then paint the arrow on the right ourselves.
+        # Paint as a normal item so the base style will not draw a left-side
+        # native arrow over the Persian label.
         text_opt = QStyleOptionMenuItem(option)
         text_opt.menuItemType = QStyleOptionMenuItem.MenuItemType.Normal
         reserve = self.ARROW_SIZE + self.ARROW_MARGIN + 8
@@ -92,19 +95,23 @@ class MenuIndicatorStyle(QProxyStyle):
         text_opt.rect.setWidth(max(0, option.rect.width() - reserve))
         super().drawControl(element, text_opt, painter, widget)
 
-        arrow_opt = QStyleOptionMenuItem(option)
-        arrow_opt.rect = QRect(
-            option.rect.right() - self.ARROW_MARGIN - self.ARROW_SIZE,
-            option.rect.center().y() - self.ARROW_SIZE // 2,
-            self.ARROW_SIZE,
-            self.ARROW_SIZE,
-        )
-        super().drawPrimitive(
-            QStyle.PrimitiveElement.PE_IndicatorArrowLeft,
-            arrow_opt,
-            painter,
-            widget,
-        )
+        # Draw our own chevron; PE_IndicatorArrow* is blank under the QSS above.
+        color = option.palette.color(QPalette.ColorRole.Text)
+        if not color.isValid() or color.alpha() == 0:
+            color = QColor("#FFFFFF")
+        cx = option.rect.right() - self.ARROW_MARGIN - self.ARROW_SIZE // 2
+        cy = option.rect.center().y()
+        half = self.ARROW_SIZE // 2
+        path = QPainterPath()
+        path.moveTo(cx + half // 2, cy - half)
+        path.lineTo(cx - half // 2, cy)
+        path.lineTo(cx + half // 2, cy + half)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(color, 1.6))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.restore()
 
 
 # Fusion honors QProxyStyle menu painting more reliably than the native style.
