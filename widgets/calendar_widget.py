@@ -21,6 +21,11 @@ def format_jalali_date(*, multiline: bool = True) -> str:
     return date_str
 
 
+def jalali_day_of_month() -> int:
+    """Current day-of-month in the Jalali calendar (1-31)."""
+    return jdatetime.datetime.now().day
+
+
 class CalendarWidget(QWidget):
     """A widget for displaying the Persian (Jalali) calendar date."""
 
@@ -53,7 +58,9 @@ class CalendarWidget(QWidget):
         """Updates the date label with the current Persian date."""
         self.label.setText(format_jalali_date(multiline=True))
         parent = self.parent()
-        if parent is not None and hasattr(parent, "_update_tray_tooltip"):
+        if parent is not None and hasattr(parent, "_update_tray"):
+            parent._update_tray()
+        elif parent is not None and hasattr(parent, "_update_tray_tooltip"):
             parent._update_tray_tooltip()
 
     def get_date_tooltip(self) -> str:

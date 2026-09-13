@@ -7,12 +7,12 @@ import psutil
 from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
                              QLabel, QDialog, QVBoxLayout, QPushButton, QColorDialog,
                              QFontDialog, QSystemTrayIcon, QProxyStyle, QStyle,
-                             QStyleOptionMenuItem)
+                             QStyleOptionMenuItem, QStyleFactory)
 from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint, QRect
-from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont
+from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont, QPixmap, QPainter
 
 # --- Local Imports ---
-from widgets.calendar_widget import CalendarWidget, format_jalali_date
+from widgets.calendar_widget import CalendarWidget, format_jalali_date, jalali_day_of_month
 from widgets.network_widget import NetworkWidget
 
 # --- Windows-specific Imports ---
@@ -39,8 +39,8 @@ DEFAULT_NETWORK_INTERVAL = 1000
 TRAY_HIDE_LABEL = "مخفی کردن در سینی سیستم"
 TRAY_START_HIDDEN_LABEL = "شروع در سینی سیستم (همراه ویندوز)"
 
-# Submenu arrows must not overlap RTL text. Reserve space on both sides and
-# pin the arrow subcontrol to the right edge (same side as checkmarks).
+# Hide native arrow glyphs (they sit on the text in RTL) and leave room on the
+# right for the custom arrow drawn by MenuIndicatorStyle.
 MENU_STYLESHEET = """
 QMenu {
     padding: 4px;
@@ -53,6 +53,15 @@ QMenu::indicator {
     height: 14px;
     margin-right: 8px;
     margin-left: 4px;
+}
+QMenu::left-arrow,
+QMenu::right-arrow {
+    width: 0px;
+    height: 0px;
+    margin: 0px;
+    padding: 0px;
+    image: none;
+    border: none;
 }
 """
 
@@ -74,8 +83,8 @@ class MenuIndicatorStyle(QProxyStyle):
         if not is_rtl_submenu:
             return super().drawControl(element, option, painter, widget)
 
-        # Draw as a normal item so the style does not place a left-side arrow
-        # on top of Persian text, then paint the arrow on the right ourselves.
+        # Draw as a normal item so the base style does not place a left-side
+        # arrow on Persian text, then paint the arrow on the right ourselves.
         text_opt = QStyleOptionMenuItem(option)
         text_opt.menuItemType = QStyleOptionMenuItem.MenuItemType.Normal
         reserve = self.ARROW_SIZE + self.ARROW_MARGIN + 8
@@ -90,7 +99,7 @@ class MenuIndicatorStyle(QProxyStyle):
             self.ARROW_SIZE,
             self.ARROW_SIZE,
         )
-        self.proxy().drawPrimitive(
+        super().drawPrimitive(
             QStyle.PrimitiveElement.PE_IndicatorArrowLeft,
             arrow_opt,
             painter,
@@ -98,8 +107,8 @@ class MenuIndicatorStyle(QProxyStyle):
         )
 
 
-# Keep a process-wide style instance so Qt does not garbage-collect it.
-MENU_STYLE = MenuIndicatorStyle()
+# Fusion honors QProxyStyle menu painting more reliably than the native style.
+MENU_STYLE = MenuIndicatorStyle(QStyleFactory.create("Fusion"))
 
 
 def build_app_stylesheet(font_name: str, font_size: int | None = None) -> str:
@@ -118,6 +127,36 @@ def configure_menu(menu: QMenu) -> QMenu:
     menu.setStyle(MENU_STYLE)
     menu.setStyleSheet(MENU_STYLESHEET)
     return menu
+
+
+def create_jalali_day_tray_icon(font_name: str, day: int | None = None) -> QIcon:
+    """Renders the Jalali day-of-month as a tray icon with the app Persian font."""
+    if day is None:
+        day = jalali_day_of_month()
+    text = str(day)
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        font = QFont(font_name)
+        font.setBold(True)
+        font.setPixelSize(max(10, int(size * 0.78)))
+        painter.setFont(font)
+
+        rect = pixmap.rect()
+        # Dark outline keeps the digit readable on light and dark taskbars.
+        painter.setPen(QColor(0, 0, 0, 200))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+            painter.drawText(rect.translated(dx, dy), int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 def get_app_base_path() -> str:
@@ -278,8 +317,8 @@ class MainWidget(QWidget):
             return
 
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.app_icon if not self.app_icon.isNull() else self.windowIcon())
-        self._update_tray_tooltip()
+        self._tray_day = None
+        self._update_tray()
 
         self.tray_menu = configure_menu(QMenu())
         self.tray_menu.aboutToShow.connect(self._populate_tray_menu)
@@ -290,7 +329,7 @@ class MainWidget(QWidget):
         self.tray_icon.show()
 
         self.tray_tooltip_timer = QTimer(self)
-        self.tray_tooltip_timer.timeout.connect(self._update_tray_tooltip)
+        self.tray_tooltip_timer.timeout.connect(self._update_tray)
         self.tray_tooltip_timer.start(60000)
 
     def _populate_tray_menu(self):
@@ -315,13 +354,26 @@ class MainWidget(QWidget):
 
     def _update_tray_tooltip(self):
         """Refreshes the tray icon tooltip with the current Jalali date."""
+        self._update_tray(icon=False)
+
+    def _update_tray(self, *, icon: bool = True, force_icon: bool = False):
+        """Refreshes tray tooltip and optional day-number icon."""
         if not self.tray_icon:
             return
+
         if hasattr(self, 'calendar'):
             tooltip = self.calendar.get_date_tooltip()
         else:
             tooltip = format_jalali_date(multiline=False)
         self.tray_icon.setToolTip(tooltip)
+
+        if not icon:
+            return
+
+        day = jalali_day_of_month()
+        if force_icon or day != getattr(self, '_tray_day', None):
+            self._tray_day = day
+            self.tray_icon.setIcon(create_jalali_day_tray_icon(self.font_name, day))
 
     def minimize_to_tray(self):
         """Hides the widget and keeps the app running in the system tray."""
@@ -334,7 +386,7 @@ class MainWidget(QWidget):
         self.hide()
         if not self.tray_icon.isVisible():
             self.tray_icon.show()
-        self._update_tray_tooltip()
+        self._update_tray()
 
     def restore_from_tray(self):
         """Shows the widget again at its previous on-screen position."""
@@ -675,6 +727,8 @@ class MainWidget(QWidget):
         QApplication.instance().setStyleSheet(
             build_app_stylesheet(self.font_name, self.font_size)
         )
+        if self.tray_icon:
+            self._update_tray(force_icon=True)
 
         if not initial:
             self.save_config()
