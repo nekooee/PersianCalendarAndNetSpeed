@@ -6,13 +6,9 @@ import psutil
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
                              QLabel, QDialog, QVBoxLayout, QPushButton, QColorDialog,
-                             QFontDialog, QSystemTrayIcon, QProxyStyle, QStyle,
-                             QStyleOptionMenuItem, QStyleFactory)
-from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint, QRect
-from PyQt6.QtGui import (
-    QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont, QPixmap, QPainter,
-    QPen, QPainterPath, QPalette,
-)
+                             QFontDialog, QSystemTrayIcon)
+from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint
+from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont, QPixmap, QPainter
 
 # --- Local Imports ---
 from widgets.calendar_widget import CalendarWidget, format_jalali_date, jalali_day_of_month
@@ -42,84 +38,37 @@ DEFAULT_NETWORK_INTERVAL = 1000
 TRAY_HIDE_LABEL = "مخفی کردن در سینی سیستم"
 TRAY_START_HIDDEN_LABEL = "شروع در سینی سیستم (همراه ویندوز)"
 
-# Suppress native RTL submenu arrows (they overlap Persian text). Custom arrows
-# are painted on the right by MenuIndicatorStyle, next to the checkmark column.
+# Keep native submenu arrows visible; pad both sides so RTL arrows/checkmarks
+# do not sit on top of Persian labels.
 MENU_STYLESHEET = """
 QMenu {
-    padding: 4px;
+    cursor: pointinghand;
 }
 QMenu::item {
-    padding: 6px 34px 6px 16px;
+    padding: 6px 28px 6px 28px;
+    cursor: pointinghand;
 }
 QMenu::indicator {
     width: 14px;
     height: 14px;
-    margin-right: 8px;
+}
+QMenu::left-arrow {
+    width: 12px;
+    height: 12px;
+    left: 8px;
     margin-left: 4px;
 }
-QMenu::left-arrow,
 QMenu::right-arrow {
-    width: 0px;
-    height: 0px;
-    margin: 0px;
-    padding: 0px;
-    image: none;
-    border: none;
+    width: 12px;
+    height: 12px;
+    right: 8px;
+    margin-right: 4px;
 }
 """
 
 
-class MenuIndicatorStyle(QProxyStyle):
-    """Draws visible RTL submenu chevrons on the right with a gap from text."""
-
-    ARROW_SIZE = 8
-    ARROW_MARGIN = 10
-
-    def drawControl(self, element, option, painter, widget=None):
-        is_rtl_submenu = (
-            element == QStyle.ControlElement.CE_MenuItem
-            and isinstance(option, QStyleOptionMenuItem)
-            and option.menuItemType == QStyleOptionMenuItem.MenuItemType.SubMenu
-            and widget is not None
-            and widget.layoutDirection() == Qt.LayoutDirection.RightToLeft
-        )
-        if not is_rtl_submenu:
-            return super().drawControl(element, option, painter, widget)
-
-        # Paint as a normal item so the base style will not draw a left-side
-        # native arrow over the Persian label.
-        text_opt = QStyleOptionMenuItem(option)
-        text_opt.menuItemType = QStyleOptionMenuItem.MenuItemType.Normal
-        reserve = self.ARROW_SIZE + self.ARROW_MARGIN + 8
-        text_opt.rect = QRect(option.rect)
-        text_opt.rect.setWidth(max(0, option.rect.width() - reserve))
-        super().drawControl(element, text_opt, painter, widget)
-
-        # Draw our own chevron; PE_IndicatorArrow* is blank under the QSS above.
-        color = option.palette.color(QPalette.ColorRole.Text)
-        if not color.isValid() or color.alpha() == 0:
-            color = QColor("#FFFFFF")
-        cx = option.rect.right() - self.ARROW_MARGIN - self.ARROW_SIZE // 2
-        cy = option.rect.center().y()
-        half = self.ARROW_SIZE // 2
-        path = QPainterPath()
-        path.moveTo(cx + half // 2, cy - half)
-        path.lineTo(cx - half // 2, cy)
-        path.lineTo(cx + half // 2, cy + half)
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(color, 1.6))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
-        painter.restore()
-
-
-# Fusion honors QProxyStyle menu painting more reliably than the native style.
-MENU_STYLE = MenuIndicatorStyle(QStyleFactory.create("Fusion"))
-
-
 def build_app_stylesheet(font_name: str, font_size: int | None = None) -> str:
-    """Builds the global app stylesheet including RTL-safe menu arrow spacing."""
+    """Builds the global app stylesheet including RTL-safe menu spacing."""
     safe_family = font_name.replace("'", "\\'")
     size_rule = f" font-size: {font_size}pt;" if font_size is not None else ""
     return (
@@ -129,10 +78,9 @@ def build_app_stylesheet(font_name: str, font_size: int | None = None) -> str:
 
 
 def configure_menu(menu: QMenu) -> QMenu:
-    """Applies RTL direction, spacing, and right-side submenu arrows."""
+    """Applies RTL direction and a hand cursor for Persian menu items."""
     menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-    menu.setStyle(MENU_STYLE)
-    menu.setStyleSheet(MENU_STYLESHEET)
+    menu.setCursor(Qt.CursorShape.PointingHandCursor)
     return menu
 
 
