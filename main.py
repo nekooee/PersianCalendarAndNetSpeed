@@ -330,6 +330,33 @@ class MainWidget(QWidget):
             self._tray_day = day
             self.tray_icon.setIcon(create_jalali_day_tray_icon(self.font_name, day))
 
+    def _panel_intended_visible(self, panel: QWidget) -> bool:
+        """True if the panel itself was not hidden (ignores parent tray-hide)."""
+        return not panel.isHidden()
+
+    def _ensure_content_visible(self):
+        """Keeps at least one child panel visible so restore is never a blank window."""
+        cal_on = self._panel_intended_visible(self.calendar)
+        net_on = self._panel_intended_visible(self.network)
+        if not cal_on and not net_on:
+            self.calendar.setVisible(True)
+            self.network.setVisible(True)
+        self.background_widget.adjustSize()
+        self.adjustSize()
+
+    def _clamp_pos_to_screens(self, pos: QPoint) -> QPoint:
+        """Moves a point onto an available screen if it sits off-screen."""
+        screens = QApplication.screens()
+        if not screens:
+            return pos
+        for screen in screens:
+            if screen.availableGeometry().contains(pos):
+                return pos
+        geo = QApplication.primaryScreen().availableGeometry()
+        x = min(max(pos.x(), geo.left()), geo.right() - max(self.width(), 40))
+        y = min(max(pos.y(), geo.top()), geo.bottom() - max(self.height(), 20))
+        return QPoint(x, y)
+
     def minimize_to_tray(self):
         """Hides the widget and keeps the app running in the system tray."""
         if not self.tray_icon:
@@ -337,6 +364,8 @@ class MainWidget(QWidget):
             return
         if self.isVisible():
             self._restore_pos = QPoint(self.pos())
+            self._saved_pos_x = self._restore_pos.x()
+            self._saved_pos_y = self._restore_pos.y()
             self.save_config()
         self.hide()
         if not self.tray_icon.isVisible():
@@ -347,29 +376,39 @@ class MainWidget(QWidget):
         """Shows the widget again at its previous on-screen position."""
         target = self._restore_pos
         if target is None:
-            target = QPoint(self.pos().x(), self.pos().y())
-            if target.x() == 0 and target.y() == 0:
-                # Fall back to last saved config coordinates when available.
-                target = QPoint(int(getattr(self, '_saved_pos_x', 100)),
-                                int(getattr(self, '_saved_pos_y', 100)))
+            target = QPoint(
+                int(getattr(self, '_saved_pos_x', self.pos().x() or 100)),
+                int(getattr(self, '_saved_pos_y', self.pos().y() or 100)),
+            )
 
+        self._ensure_content_visible()
+        target = self._clamp_pos_to_screens(target)
+        self._restore_pos = QPoint(target)
         self.move(target)
         self.show()
+        self.showNormal()
         self.raise_()
         self.activateWindow()
         self.ensure_on_top_windows()
+        if IS_WINDOWS:
+            try:
+                hwnd = int(self.winId())
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                win32gui.SetWindowPos(
+                    hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+                )
+            except Exception:
+                pass
         self.save_config()
 
     def _on_tray_activated(self, reason):
-        """Handles tray icon clicks; double-click restores the widget."""
+        """Handles tray icon clicks; double-click toggles widget visibility."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             if self.isVisible():
                 self.minimize_to_tray()
             else:
                 self.restore_from_tray()
-        elif reason == QSystemTrayIcon.ActivationReason.Trigger:
-            # Single left-click on Windows often maps to Trigger; keep tooltip-only.
-            pass
 
     def periodic_on_top_check(self):
         """Ensures the window stays on top, unless a menu is open or hidden."""
@@ -694,11 +733,35 @@ class MainWidget(QWidget):
 
     def save_config(self):
         """Saves current settings to config.json next to the app."""
+        # While hidden in the tray, isVisible() is False for children too.
+        # Persist intentional panel state via isHidden(), and keep last on-screen pos.
+        if self.isVisible():
+            pos = self.pos()
+        elif self._restore_pos is not None:
+            pos = self._restore_pos
+        else:
+            pos = QPoint(
+                int(getattr(self, '_saved_pos_x', self.pos().x())),
+                int(getattr(self, '_saved_pos_y', self.pos().y())),
+            )
+
+        if hasattr(self, 'calendar'):
+            calendar_visible = self._panel_intended_visible(self.calendar)
+        else:
+            calendar_visible = True
+        if hasattr(self, 'network'):
+            network_visible = self._panel_intended_visible(self.network)
+        else:
+            network_visible = True
+        if not calendar_visible and not network_visible:
+            calendar_visible = True
+            network_visible = True
+
         config = {
-            "pos_x": self.pos().x(),
-            "pos_y": self.pos().y(),
-            "calendar_visible": self.calendar.isVisible() if hasattr(self, 'calendar') else True,
-            "network_visible": self.network.isVisible() if hasattr(self, 'network') else True,
+            "pos_x": pos.x(),
+            "pos_y": pos.y(),
+            "calendar_visible": calendar_visible,
+            "network_visible": network_visible,
             "network_interface": (self.network.interface or '') if hasattr(self, 'network') else '',
             "opacity": self.opacity_level,
             "network_interval": (
@@ -779,8 +842,14 @@ class MainWidget(QWidget):
         if not config:
             return
 
-        self.calendar.setVisible(self._as_bool(config.get("calendar_visible"), True))
-        self.network.setVisible(self._as_bool(config.get("network_visible"), True))
+        calendar_visible = self._as_bool(config.get("calendar_visible"), True)
+        network_visible = self._as_bool(config.get("network_visible"), True)
+        # Older builds wrongly saved both as false while minimized to tray.
+        if not calendar_visible and not network_visible:
+            calendar_visible = True
+            network_visible = True
+        self.calendar.setVisible(calendar_visible)
+        self.network.setVisible(network_visible)
 
         saved_iface = str(config.get("network_interface", "") or "").strip()
         if saved_iface:
