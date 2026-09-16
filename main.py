@@ -210,8 +210,12 @@ class MainWidget(QWidget):
         self._pending_config = {}
         self._restore_pos = None
         self._is_quitting = False
+        self._in_tray = False
         self.tray_icon = None
         self.start_minimized_to_tray = False
+        self._tray_click_timer = QTimer(self)
+        self._tray_click_timer.setSingleShot(True)
+        self._tray_click_timer.timeout.connect(self._on_tray_single_click)
 
         # Correctly resolve paths for both bundled exe and normal script
         base_path = get_app_base_path()
@@ -275,7 +279,8 @@ class MainWidget(QWidget):
         self._tray_day = None
         self._update_tray()
 
-        self.tray_menu = configure_menu(QMenu())
+        # Parent the menu to this widget so Windows keeps action triggers alive.
+        self.tray_menu = configure_menu(QMenu(self))
         self.tray_menu.aboutToShow.connect(self._populate_tray_menu)
         self._populate_tray_menu()
 
@@ -288,19 +293,19 @@ class MainWidget(QWidget):
         self.tray_tooltip_timer.start(60000)
 
     def _populate_tray_menu(self):
-        """Builds tray menu actions based on whether the widget is visible."""
+        """Builds tray menu from explicit tray state (not Qt isVisible)."""
         if not hasattr(self, 'tray_menu') or self.tray_menu is None:
             return
         self.tray_menu.clear()
 
-        if self.isVisible():
-            hide_action = QAction(TRAY_HIDE_LABEL, self)
-            hide_action.triggered.connect(self.minimize_to_tray)
-            self.tray_menu.addAction(hide_action)
-        else:
+        if self._in_tray:
             show_action = QAction("نمایش ویجت", self)
             show_action.triggered.connect(self.restore_from_tray)
             self.tray_menu.addAction(show_action)
+        else:
+            hide_action = QAction(TRAY_HIDE_LABEL, self)
+            hide_action.triggered.connect(self.minimize_to_tray)
+            self.tray_menu.addAction(hide_action)
 
         self.tray_menu.addSeparator()
         exit_action = QAction("خروج", self)
@@ -362,11 +367,12 @@ class MainWidget(QWidget):
         if not self.tray_icon:
             self._show_error_message("سینی سیستم در این سیستم در دسترس نیست.")
             return
-        if self.isVisible():
+        if self.isVisible() and not self._in_tray:
             self._restore_pos = QPoint(self.pos())
             self._saved_pos_x = self._restore_pos.x()
             self._saved_pos_y = self._restore_pos.y()
             self.save_config()
+        self._in_tray = True
         self.hide()
         if not self.tray_icon.isVisible():
             self.tray_icon.show()
@@ -374,6 +380,7 @@ class MainWidget(QWidget):
 
     def restore_from_tray(self):
         """Shows the widget again at its previous on-screen position."""
+        self._tray_click_timer.stop()
         target = self._restore_pos
         if target is None:
             target = QPoint(
@@ -381,10 +388,19 @@ class MainWidget(QWidget):
                 int(getattr(self, '_saved_pos_y', self.pos().y() or 100)),
             )
 
+        self._in_tray = False
         self._ensure_content_visible()
         target = self._clamp_pos_to_screens(target)
         self._restore_pos = QPoint(target)
         self.move(target)
+
+        # Re-assert window flags before show; Tool windows can stick hidden on Windows.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.show()
         self.showNormal()
         self.raise_()
@@ -394,25 +410,38 @@ class MainWidget(QWidget):
             try:
                 hwnd = int(self.winId())
                 win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                 win32gui.SetWindowPos(
                     hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
                     win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
                 )
             except Exception:
                 pass
+        self.background_widget.adjustSize()
+        self.adjustSize()
         self.save_config()
 
+    def _on_tray_single_click(self):
+        """Restores from tray on a delayed single left-click."""
+        if self._in_tray:
+            self.restore_from_tray()
+
     def _on_tray_activated(self, reason):
-        """Handles tray icon clicks; double-click toggles widget visibility."""
+        """Tray clicks: restore when hidden; double-click hides when visible."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            if self.isVisible():
-                self.minimize_to_tray()
-            else:
+            self._tray_click_timer.stop()
+            if self._in_tray:
                 self.restore_from_tray()
+            else:
+                self.minimize_to_tray()
+        elif reason == QSystemTrayIcon.ActivationReason.Trigger:
+            # Single click often fires before DoubleClick; delay when restoring.
+            if self._in_tray:
+                self._tray_click_timer.start(280)
 
     def periodic_on_top_check(self):
-        """Ensures the window stays on top, unless a menu is open or hidden."""
-        if not self.menu_is_open and self.isVisible():
+        """Ensures the window stays on top, unless a menu is open or in tray."""
+        if not self.menu_is_open and not self._in_tray and self.isVisible():
             self.ensure_on_top_windows()
 
     def ensure_on_top_windows(self):
@@ -735,7 +764,7 @@ class MainWidget(QWidget):
         """Saves current settings to config.json next to the app."""
         # While hidden in the tray, isVisible() is False for children too.
         # Persist intentional panel state via isHidden(), and keep last on-screen pos.
-        if self.isVisible():
+        if self.isVisible() and not self._in_tray:
             pos = self.pos()
         elif self._restore_pos is not None:
             pos = self._restore_pos
@@ -971,8 +1000,10 @@ def main():
 
     widget = MainWidget(font_name=font_name)
     if widget.start_minimized_to_tray and widget.tray_icon:
+        # Start directly in tray; menu must show «نمایش ویجت», not hide.
         widget.minimize_to_tray()
     else:
+        widget._in_tray = False
         widget.show()
 
     try:
