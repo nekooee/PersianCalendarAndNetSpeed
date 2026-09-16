@@ -286,7 +286,7 @@ class MainWidget(QWidget):
 
         self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
-        self.tray_icon.show()
+        # Keep the icon hidden while the widget is on the desktop; show only in tray mode.
 
         self.tray_tooltip_timer = QTimer(self)
         self.tray_tooltip_timer.timeout.connect(self._update_tray)
@@ -374,8 +374,7 @@ class MainWidget(QWidget):
             self.save_config()
         self._in_tray = True
         self.hide()
-        if not self.tray_icon.isVisible():
-            self.tray_icon.show()
+        self.tray_icon.show()
         self._update_tray()
 
     def restore_from_tray(self):
@@ -389,6 +388,8 @@ class MainWidget(QWidget):
             )
 
         self._in_tray = False
+        if self.tray_icon:
+            self.tray_icon.hide()
         self._ensure_content_visible()
         target = self._clamp_pos_to_screens(target)
         self._restore_pos = QPoint(target)
