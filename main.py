@@ -22,7 +22,12 @@ from widgets.timezone_widget import (
     DEFAULT_USE_12H,
     TimezoneWidget,
 )
-from widgets.update_checker import UpdateCheckResult, UpdateStatus, check_latest_release_async
+from widgets.update_checker import (
+    UpdateCheckResult,
+    UpdateStatus,
+    check_latest_release_async,
+    normalize_version,
+)
 from widgets.update_toast import (
     show_update_available_toast,
     show_up_to_date_toast,
@@ -271,6 +276,7 @@ class MainWidget(QWidget):
         self._tray_click_timer.timeout.connect(self._on_tray_single_click)
         self._update_check_busy = False
         self._update_toast = None
+        self.dismissed_update_version = ""
         self._update_bridge = UpdateCheckBridge(self)
         self._update_bridge.finished.connect(self._on_update_check_finished)
 
@@ -968,6 +974,7 @@ class MainWidget(QWidget):
             "text_color": self.text_color,
             "bg_color": self.bg_color,
             "start_minimized_to_tray": self.start_minimized_to_tray,
+            "dismissed_update_version": self.dismissed_update_version or "",
         }
         path = get_config_path(for_write=True)
         try:
@@ -1020,6 +1027,9 @@ class MainWidget(QWidget):
                 self.font_name = config["font_name"]
             self.start_minimized_to_tray = self._as_bool(
                 config.get("start_minimized_to_tray"), False
+            )
+            self.dismissed_update_version = normalize_version(
+                str(config.get("dismissed_update_version", "") or "")
             )
             self._pending_config = config
         except Exception as e:
@@ -1132,12 +1142,21 @@ class MainWidget(QWidget):
             return
 
         if result.status == UpdateStatus.UPDATE_AVAILABLE:
+            remote = normalize_version(result.remote_version)
+            # Startup: do not nag again for a version the user already dismissed.
+            if (
+                not manual
+                and remote
+                and remote == normalize_version(self.dismissed_update_version)
+            ):
+                return
             self._replace_update_toast(
                 show_update_available_toast(
                     local_version=result.local_version or APP_VERSION,
                     remote_version=result.remote_version,
                     release_url=result.release_url,
                     app_icon=self.app_icon,
+                    on_dismissed=lambda v=remote: self._remember_dismissed_update(v),
                 )
             )
             return
@@ -1158,11 +1177,21 @@ class MainWidget(QWidget):
                 show_update_check_failed_toast(app_icon=self.app_icon)
             )
 
+    def _remember_dismissed_update(self, remote_version: str):
+        """Persists that this remote version was acknowledged (X / download click)."""
+        version = normalize_version(remote_version)
+        if not version or version == self.dismissed_update_version:
+            return
+        self.dismissed_update_version = version
+        self.save_config()
+
     def _replace_update_toast(self, toast):
         """Keeps a single toast alive so Python GC does not dismiss it early."""
         previous = self._update_toast
         self._update_toast = toast
         if previous is not None and previous is not toast:
+            if hasattr(previous, "suppress_dismiss_callback"):
+                previous.suppress_dismiss_callback()
             previous.close()
             previous.deleteLater()
 

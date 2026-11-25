@@ -32,9 +32,13 @@ class UpdateToast(QWidget):
         parent=None,
         auto_close_ms: int | None = None,
         accept_focus: bool = False,
+        on_dismissed=None,
     ):
         super().__init__(parent)
         self._action_url = action_url
+        self._on_dismissed = on_dismissed
+        self._dismiss_emitted = False
+        self._suppress_dismiss = False
         self._auto_close_ms = auto_close_ms if auto_close_ms and auto_close_ms > 0 else None
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
@@ -168,6 +172,24 @@ class UpdateToast(QWidget):
         self._arm_auto_close()
         super().leaveEvent(event)
 
+    def suppress_dismiss_callback(self):
+        """Used when replacing this toast programmatically (not a user dismiss)."""
+        self._suppress_dismiss = True
+
+    def _emit_dismissed(self):
+        if self._suppress_dismiss or self._dismiss_emitted:
+            return
+        self._dismiss_emitted = True
+        if self._on_dismissed is not None:
+            try:
+                self._on_dismissed()
+            except Exception:
+                pass
+
+    def closeEvent(self, event):
+        self._emit_dismissed()
+        super().closeEvent(event)
+
     def _on_link_activated(self, link: str):
         QDesktopServices.openUrl(QUrl(link))
         self.close()
@@ -199,6 +221,7 @@ def show_update_available_toast(
     release_url: str,
     app_icon=None,
     parent=None,
+    on_dismissed=None,
 ) -> UpdateToast:
     # Stays until the user closes it or opens the release page (no auto-dismiss).
     toast = UpdateToast(
@@ -214,6 +237,7 @@ def show_update_available_toast(
         parent=parent,
         auto_close_ms=None,
         accept_focus=True,
+        on_dismissed=on_dismissed,
     )
     toast.show_near_bottom_right()
     return toast
