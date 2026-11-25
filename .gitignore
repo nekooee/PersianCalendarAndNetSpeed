@@ -6,6 +6,7 @@
 /icon.png
 /.idea/
 /config.txt
+/config.json
 /tmp_sf/
 __pycache__/
 **/__pycache__/

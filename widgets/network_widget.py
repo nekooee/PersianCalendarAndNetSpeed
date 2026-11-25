@@ -1,7 +1,15 @@
 import time
 import psutil
-from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
 from PyQt6.QtCore import Qt, QTimer
+
+# Wide enough for real-world peaks so label text never reflows sibling panels.
+_WIDTH_PROBE_STRINGS = (
+    "↓ 9999.99 MB/s",
+    "↑ 9999.99 MB/s",
+    "↓ 1023.9 KB/s",
+    "↑ 1023.9 KB/s",
+)
 
 
 class NetworkWidget(QWidget):
@@ -48,23 +56,41 @@ class NetworkWidget(QWidget):
     def init_ui(self):
         """Initializes the widget's UI."""
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Keep network on the trailing (right) side of an LTR strip so growth
+        # never pushes the world clock / Shamsi date.
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Left-aligned: digits extend toward the right inside the reserved slot.
         self.download_label = QLabel("↓ 0.0 KB/s")
-        self.download_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.download_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
 
         self.upload_label = QLabel("↑ 0.0 KB/s")
-        self.upload_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.upload_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
 
         layout.addWidget(self.download_label)
         layout.addWidget(self.upload_label)
         self.set_text_color("#FFFFFF")
+        self.refresh_stable_width()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_speed)
         self.timer.start(1000)
+
+    def refresh_stable_width(self):
+        """Locks horizontal size so speed text changes do not reflow neighbors."""
+        metrics = self.download_label.fontMetrics()
+        width = max(metrics.horizontalAdvance(sample) for sample in _WIDTH_PROBE_STRINGS)
+        # Small slack for antialiasing / stylesheet padding differences.
+        self.setFixedWidth(max(width + 4, 1))
 
     def format_speed(self, speed_bytes_per_sec):
         """Formats speed in bytes/sec into a human-readable string (KB/s, MB/s)."""
@@ -134,3 +160,4 @@ class NetworkWidget(QWidget):
         style = f"background-color: transparent; color: {color}; padding: 0px;"
         self.download_label.setStyleSheet(style)
         self.upload_label.setStyleSheet(style)
+        self.refresh_stable_width()

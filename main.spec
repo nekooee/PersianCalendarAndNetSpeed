@@ -1,13 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
 block_cipher = None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.'), ('fonts', 'fonts')],
-    hiddenimports=[],
+    datas=[('icon.ico', '.'), ('fonts', 'fonts')] + collect_data_files('tzdata'),
+    hiddenimports=['tzdata'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

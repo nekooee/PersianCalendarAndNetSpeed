@@ -4,3 +4,4 @@ pywin32==311
 psutil==7.0.0
 pywin32-ctypes==0.2.3
 packaging==25.0
+tzdata>=2024.1

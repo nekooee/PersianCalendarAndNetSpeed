@@ -6,13 +6,28 @@ import psutil
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QMenu, QHBoxLayout, QMessageBox,
                              QLabel, QDialog, QVBoxLayout, QPushButton, QColorDialog,
-                             QFontDialog, QSystemTrayIcon)
-from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint
+                             QFontDialog, QSystemTrayIcon, QFrame, QWidgetAction)
+from PyQt6.QtCore import QTimer, Qt, QUrl, QPoint, QObject, pyqtSignal
 from PyQt6.QtGui import QAction, QFontDatabase, QIcon, QDesktopServices, QColor, QFont, QPixmap, QPainter
 
 # --- Local Imports ---
+# tzdata ships IANA zone files on Windows; keep the import so freezers bundle it.
+import tzdata  # noqa: F401
+
 from widgets.calendar_widget import CalendarWidget, format_jalali_date, jalali_day_of_month
 from widgets.network_widget import NetworkWidget
+from widgets.timezone_picker import TimezonePickerDialog
+from widgets.timezone_widget import (
+    DEFAULT_TIMEZONE,
+    DEFAULT_USE_12H,
+    TimezoneWidget,
+)
+from widgets.update_checker import UpdateCheckResult, UpdateStatus, check_latest_release_async
+from widgets.update_toast import (
+    show_update_available_toast,
+    show_up_to_date_toast,
+    show_update_check_failed_toast,
+)
 
 # --- Windows-specific Imports ---
 # Used for "Always on Top" and startup integration.
@@ -26,7 +41,7 @@ except ImportError:
     IS_WINDOWS = False
 
 # --- Constants ---
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.2.1"
 APP_ICON_PATH = "icon.ico"
 CONFIG_FILENAME = "config.json"
 LEGACY_CONFIG_FILENAME = "config.txt"
@@ -35,6 +50,7 @@ DEFAULT_BG_COLOR = "#141414"
 DEFAULT_FONT_SIZE = 10
 DEFAULT_OPACITY = 0.6
 DEFAULT_NETWORK_INTERVAL = 1000
+DEFAULT_WORLD_CLOCK_VISIBLE = False
 TRAY_HIDE_LABEL = "مخفی کردن در سینی سیستم"
 TRAY_START_HIDDEN_LABEL = "شروع در سینی سیستم (همراه ویندوز)"
 
@@ -64,7 +80,22 @@ QMenu::right-arrow {
     right: 8px;
     margin-right: 4px;
 }
+QMenu::separator {
+    height: 1px;
+    margin: 5px 14px;
+    background: rgba(255, 255, 255, 0.40);
+    border: none;
+}
 """
+
+# Delay so the shell is up before the single background GitHub probe.
+STARTUP_UPDATE_CHECK_DELAY_MS = 2500
+
+
+class UpdateCheckBridge(QObject):
+    """Marshals update-check results from a worker thread onto the UI thread."""
+
+    finished = pyqtSignal(object, bool)  # UpdateCheckResult, manual
 
 
 def build_app_stylesheet(font_name: str, font_size: int | None = None) -> str:
@@ -82,6 +113,28 @@ def configure_menu(menu: QMenu) -> QMenu:
     menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
     menu.setCursor(Qt.CursorShape.PointingHandCursor)
     return menu
+
+
+def add_menu_separator(menu: QMenu) -> None:
+    """Inset single-line separator (avoids the native double-groove look)."""
+    wrapper = QWidget(menu)
+    wrapper.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    wrapper.setFixedHeight(11)
+    wrapper.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+
+    row = QHBoxLayout(wrapper)
+    row.setContentsMargins(14, 5, 14, 5)
+    row.setSpacing(0)
+
+    line = QFrame(wrapper)
+    line.setFrameShape(QFrame.Shape.NoFrame)
+    line.setFixedHeight(1)
+    line.setStyleSheet("background-color: rgba(255, 255, 255, 0.40); border: none;")
+    row.addWidget(line)
+
+    action = QWidgetAction(menu)
+    action.setDefaultWidget(wrapper)
+    menu.addAction(action)
 
 
 def create_jalali_day_tray_icon(font_name: str, day: int | None = None) -> QIcon:
@@ -216,6 +269,10 @@ class MainWidget(QWidget):
         self._tray_click_timer = QTimer(self)
         self._tray_click_timer.setSingleShot(True)
         self._tray_click_timer.timeout.connect(self._on_tray_single_click)
+        self._update_check_busy = False
+        self._update_toast = None
+        self._update_bridge = UpdateCheckBridge(self)
+        self._update_bridge.finished.connect(self._on_update_check_finished)
 
         # Correctly resolve paths for both bundled exe and normal script
         base_path = get_app_base_path()
@@ -235,6 +292,8 @@ class MainWidget(QWidget):
         self.init_tray()
         # Ensure config.json is created/updated as soon as the app is ready.
         QTimer.singleShot(0, self.save_config)
+        # Single lightweight GitHub probe after UI is ready (no retries).
+        QTimer.singleShot(STARTUP_UPDATE_CHECK_DELAY_MS, self._check_for_updates_on_startup)
 
         if IS_WINDOWS:
             # Periodically ensure the widget remains on top of other windows.
@@ -251,20 +310,30 @@ class MainWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
+        # Force LTR so network stays on the right and width changes expand rightward.
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setDirection(QHBoxLayout.Direction.LeftToRight)
 
         self.background_widget = QWidget()
+        self.background_widget.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.update_background_style()
 
         container_layout = QHBoxLayout(self.background_widget)
         container_layout.setContentsMargins(10, 3, 10, 3)
-        container_layout.setSpacing(10)
+        container_layout.setDirection(QHBoxLayout.Direction.LeftToRight)
+        # Slightly wider gap so world clock reads as its own block left of the date.
+        container_layout.setSpacing(14)
 
+        self.world_clock = TimezoneWidget(parent=self)
         self.calendar = CalendarWidget(parent=self)
         self.network = NetworkWidget(parent=self)
         self.apply_text_color()
 
+        # Visual order (LTR): world clock | Shamsi date | network
+        container_layout.addWidget(self.world_clock, alignment=Qt.AlignmentFlag.AlignCenter)
         container_layout.addWidget(self.calendar, alignment=Qt.AlignmentFlag.AlignCenter)
         container_layout.addWidget(self.network, alignment=Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.background_widget)
@@ -307,7 +376,7 @@ class MainWidget(QWidget):
             hide_action.triggered.connect(self.minimize_to_tray)
             self.tray_menu.addAction(hide_action)
 
-        self.tray_menu.addSeparator()
+        add_menu_separator(self.tray_menu)
         exit_action = QAction("خروج", self)
         exit_action.triggered.connect(self._quit_application)
         self.tray_menu.addAction(exit_action)
@@ -339,11 +408,18 @@ class MainWidget(QWidget):
         """True if the panel itself was not hidden (ignores parent tray-hide)."""
         return not panel.isHidden()
 
+    def _panel_states(self) -> tuple[bool, bool, bool]:
+        """Intended visibility for calendar, network, and world clock."""
+        return (
+            self._panel_intended_visible(self.calendar),
+            self._panel_intended_visible(self.network),
+            self._panel_intended_visible(self.world_clock),
+        )
+
     def _ensure_content_visible(self):
         """Keeps at least one child panel visible so restore is never a blank window."""
-        cal_on = self._panel_intended_visible(self.calendar)
-        net_on = self._panel_intended_visible(self.network)
-        if not cal_on and not net_on:
+        cal_on, net_on, clock_on = self._panel_states()
+        if not cal_on and not net_on and not clock_on:
             self.calendar.setVisible(True)
             self.network.setVisible(True)
         self.background_widget.adjustSize()
@@ -467,11 +543,13 @@ class MainWidget(QWidget):
         self.background_widget.setStyleSheet(style)
 
     def apply_text_color(self):
-        """Applies the current text color to calendar and network widgets."""
+        """Applies the current text color to calendar, network, and world clock."""
         if hasattr(self, 'calendar'):
             self.calendar.set_text_color(self.text_color)
         if hasattr(self, 'network'):
             self.network.set_text_color(self.text_color)
+        if hasattr(self, 'world_clock'):
+            self.world_clock.set_text_color(self.text_color)
 
     # --- Event Handlers for Window Dragging ---
     def mousePressEvent(self, event):
@@ -505,7 +583,28 @@ class MainWidget(QWidget):
         show_network_action.toggled.connect(self._toggle_network_visibility)
         context_menu.addAction(show_network_action)
 
-        context_menu.addSeparator()
+        show_world_clock_action = QAction("نمایش ساعت جهانی", self, checkable=True)
+        show_world_clock_action.setChecked(self.world_clock.isVisible())
+        show_world_clock_action.toggled.connect(self._toggle_world_clock_visibility)
+        context_menu.addAction(show_world_clock_action)
+
+        world_clock_menu = configure_menu(context_menu.addMenu("تنظیمات ساعت جهانی"))
+        format_12h_action = QAction("۱۲ ساعته (AM/PM) — پیشفرض", self, checkable=True)
+        format_12h_action.setChecked(self.world_clock.use_12h)
+        format_12h_action.triggered.connect(lambda: self._set_world_clock_12h(True))
+        world_clock_menu.addAction(format_12h_action)
+
+        format_24h_action = QAction("۲۴ ساعته", self, checkable=True)
+        format_24h_action.setChecked(not self.world_clock.use_12h)
+        format_24h_action.triggered.connect(lambda: self._set_world_clock_12h(False))
+        world_clock_menu.addAction(format_24h_action)
+
+        add_menu_separator(world_clock_menu)
+        pick_timezone_action = QAction("انتخاب منطقه زمانی…", self)
+        pick_timezone_action.triggered.connect(self._open_timezone_picker)
+        world_clock_menu.addAction(pick_timezone_action)
+
+        add_menu_separator(context_menu)
 
         appearance_menu = configure_menu(context_menu.addMenu("ظاهر"))
 
@@ -521,7 +620,7 @@ class MainWidget(QWidget):
         font_action.triggered.connect(self._choose_font)
         appearance_menu.addAction(font_action)
 
-        appearance_menu.addSeparator()
+        add_menu_separator(appearance_menu)
 
         font_menu = configure_menu(appearance_menu.addMenu("اندازه فونت"))
         for size in range(9, 17):
@@ -544,7 +643,7 @@ class MainWidget(QWidget):
         reset_appearance_action.triggered.connect(self._reset_appearance)
         appearance_menu.addAction(reset_appearance_action)
 
-        update_interval_menu = configure_menu(context_menu.addMenu("تنظیم زمان‌بندی به‌روزرسانی"))
+        update_interval_menu = configure_menu(context_menu.addMenu("زمان‌بندی سرعت شبکه"))
         intervals = {"0.5 ثانیه": 500, "1 ثانیه": 1000, "1.5 ثانیه": 1500, "2 ثانیه": 2000, "2.5 ثانیه": 2500, "3 ثانیه": 3000}
         current_interval = self.network.timer.interval()
         for label, value in intervals.items():
@@ -564,7 +663,7 @@ class MainWidget(QWidget):
         except Exception as e:
             interface_menu.addAction(QAction(f"Error: {e}", self, enabled=False))
 
-        context_menu.addSeparator()
+        add_menu_separator(context_menu)
 
         minimize_tray_action = QAction(TRAY_HIDE_LABEL, self)
         minimize_tray_action.triggered.connect(self.minimize_to_tray)
@@ -574,7 +673,7 @@ class MainWidget(QWidget):
         reset_all_action.triggered.connect(self._reset_all_settings)
         context_menu.addAction(reset_all_action)
 
-        context_menu.addSeparator()
+        add_menu_separator(context_menu)
 
         if IS_WINDOWS:
             startup_action = QAction("اجرای خودکار هنگام شروع ویندوز", self, checkable=True)
@@ -586,7 +685,11 @@ class MainWidget(QWidget):
             start_in_tray_action.setChecked(self.start_minimized_to_tray)
             start_in_tray_action.toggled.connect(self._toggle_start_minimized_to_tray)
             context_menu.addAction(start_in_tray_action)
-            context_menu.addSeparator()
+            add_menu_separator(context_menu)
+
+        check_update_action = QAction("بررسی به‌روزرسانی", self)
+        check_update_action.triggered.connect(self._check_for_updates_manual)
+        context_menu.addAction(check_update_action)
 
         about_action = QAction("درباره برنامه", self)
         about_action.triggered.connect(self._show_about_dialog)
@@ -599,9 +702,18 @@ class MainWidget(QWidget):
         context_menu.exec(event.globalPos())
         self.menu_is_open = False
 
+    def _can_hide_panel(self, panel: QWidget) -> bool:
+        """False when hiding this panel would leave the widget empty."""
+        others_on = any(
+            self._panel_intended_visible(other)
+            for other in (self.calendar, self.network, self.world_clock)
+            if other is not panel
+        )
+        return others_on
+
     def _toggle_calendar_visibility(self, visible):
         """Shows or hides the calendar widget."""
-        if not visible and not self.network.isVisible():
+        if not visible and not self._can_hide_panel(self.calendar):
             if sender := self.sender():
                 sender.setChecked(True)
             self._show_error_message("حداقل یک ویجت باید فعال باشد.")
@@ -613,7 +725,7 @@ class MainWidget(QWidget):
 
     def _toggle_network_visibility(self, visible):
         """Shows or hides the network widget."""
-        if not visible and not self.calendar.isVisible():
+        if not visible and not self._can_hide_panel(self.network):
             if sender := self.sender():
                 sender.setChecked(True)
             self._show_error_message("حداقل یک ویجت باید فعال باشد.")
@@ -622,6 +734,43 @@ class MainWidget(QWidget):
         self.background_widget.adjustSize()
         self.adjustSize()
         self.save_config()
+
+    def _toggle_world_clock_visibility(self, visible):
+        """Shows or hides the world-clock widget (off by default after install)."""
+        if not visible and not self._can_hide_panel(self.world_clock):
+            if sender := self.sender():
+                sender.setChecked(True)
+            self._show_error_message("حداقل یک ویجت باید فعال باشد.")
+            return
+        self.world_clock.setVisible(visible)
+        self.background_widget.adjustSize()
+        self.adjustSize()
+        self.save_config()
+
+    def _set_world_clock_12h(self, use_12h: bool):
+        """Persists 12-hour (AM/PM) vs 24-hour formatting for the world clock."""
+        self.world_clock.set_use_12h(use_12h)
+        self.background_widget.adjustSize()
+        self.adjustSize()
+        self.save_config()
+
+    def _open_timezone_picker(self):
+        """Opens the searchable timezone dialog without bloating the context menu."""
+        dialog = TimezonePickerDialog(
+            self,
+            current_zone_id=self.world_clock.zone_id,
+            use_12h=self.world_clock.use_12h,
+            app_icon=self.app_icon,
+        )
+        self._center_dialog(dialog)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if self.world_clock.set_timezone(dialog.selected_zone_id):
+            self.background_widget.adjustSize()
+            self.adjustSize()
+            self.save_config()
+        else:
+            self._show_error_message("منطقه زمانی انتخاب‌شده روی این سیستم پشتیبانی نمی‌شود.")
 
     def _set_network_interface(self, interface_name: str):
         """Sets the monitored network interface and persists the choice."""
@@ -678,6 +827,9 @@ class MainWidget(QWidget):
         self._reset_appearance()
         self.calendar.setVisible(True)
         self.network.setVisible(True)
+        self.world_clock.setVisible(DEFAULT_WORLD_CLOCK_VISIBLE)
+        self.world_clock.set_timezone(DEFAULT_TIMEZONE)
+        self.world_clock.set_use_12h(DEFAULT_USE_12H)
         self.network.set_update_interval(DEFAULT_NETWORK_INTERVAL)
         default_iface = self.network.get_default_interface()
         if default_iface:
@@ -751,6 +903,9 @@ class MainWidget(QWidget):
         QApplication.instance().setStyleSheet(
             build_app_stylesheet(self.font_name, self.font_size)
         )
+        if hasattr(self, 'network'):
+            # Font metrics changed; keep the reserved network column stable.
+            self.network.refresh_stable_width()
         if self.tray_icon:
             self._update_tray(force_icon=True)
 
@@ -783,7 +938,11 @@ class MainWidget(QWidget):
             network_visible = self._panel_intended_visible(self.network)
         else:
             network_visible = True
-        if not calendar_visible and not network_visible:
+        if hasattr(self, 'world_clock'):
+            world_clock_visible = self._panel_intended_visible(self.world_clock)
+        else:
+            world_clock_visible = DEFAULT_WORLD_CLOCK_VISIBLE
+        if not calendar_visible and not network_visible and not world_clock_visible:
             calendar_visible = True
             network_visible = True
 
@@ -792,6 +951,13 @@ class MainWidget(QWidget):
             "pos_y": pos.y(),
             "calendar_visible": calendar_visible,
             "network_visible": network_visible,
+            "world_clock_visible": world_clock_visible,
+            "world_clock_timezone": (
+                self.world_clock.zone_id if hasattr(self, 'world_clock') else DEFAULT_TIMEZONE
+            ),
+            "world_clock_use_12h": (
+                self.world_clock.use_12h if hasattr(self, 'world_clock') else DEFAULT_USE_12H
+            ),
             "network_interface": (self.network.interface or '') if hasattr(self, 'network') else '',
             "opacity": self.opacity_level,
             "network_interval": (
@@ -874,12 +1040,24 @@ class MainWidget(QWidget):
 
         calendar_visible = self._as_bool(config.get("calendar_visible"), True)
         network_visible = self._as_bool(config.get("network_visible"), True)
+        world_clock_visible = self._as_bool(
+            config.get("world_clock_visible"), DEFAULT_WORLD_CLOCK_VISIBLE
+        )
         # Older builds wrongly saved both as false while minimized to tray.
-        if not calendar_visible and not network_visible:
+        if not calendar_visible and not network_visible and not world_clock_visible:
             calendar_visible = True
             network_visible = True
+
+        saved_zone = str(config.get("world_clock_timezone", DEFAULT_TIMEZONE) or DEFAULT_TIMEZONE)
+        if not self.world_clock.set_timezone(saved_zone):
+            self.world_clock.set_timezone(DEFAULT_TIMEZONE)
+        self.world_clock.set_use_12h(
+            self._as_bool(config.get("world_clock_use_12h"), DEFAULT_USE_12H)
+        )
+
         self.calendar.setVisible(calendar_visible)
         self.network.setVisible(network_visible)
+        self.world_clock.setVisible(world_clock_visible)
 
         saved_iface = str(config.get("network_interface", "") or "").strip()
         if saved_iface:
@@ -921,6 +1099,73 @@ class MainWidget(QWidget):
         self._center_dialog(msg_box)
         msg_box.exec()
 
+    def _check_for_updates_on_startup(self):
+        """One silent probe after launch; only notifies when a newer release exists."""
+        self._start_update_check(manual=False)
+
+    def _check_for_updates_manual(self):
+        """User-triggered check; always reports available / up-to-date / unreachable."""
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual: bool):
+        """Starts at most one in-flight GitHub request (daemon thread, no retries)."""
+        if self._update_check_busy:
+            return
+        self._update_check_busy = True
+
+        def _on_worker_done(result: UpdateCheckResult):
+            # Signal is thread-safe and delivers onto the UI thread.
+            self._update_bridge.finished.emit(result, manual)
+
+        check_latest_release_async(APP_VERSION, _on_worker_done)
+
+    def _on_update_check_finished(self, result: object, manual: bool):
+        """Handles update-check outcomes on the UI thread."""
+        self._update_check_busy = False
+        if self._is_quitting:
+            return
+        if not isinstance(result, UpdateCheckResult):
+            if manual:
+                self._replace_update_toast(
+                    show_update_check_failed_toast(app_icon=self.app_icon)
+                )
+            return
+
+        if result.status == UpdateStatus.UPDATE_AVAILABLE:
+            self._replace_update_toast(
+                show_update_available_toast(
+                    local_version=result.local_version or APP_VERSION,
+                    remote_version=result.remote_version,
+                    release_url=result.release_url,
+                    app_icon=self.app_icon,
+                )
+            )
+            return
+
+        if not manual:
+            # Startup: stay quiet when already current or GitHub is unreachable.
+            return
+
+        if result.status == UpdateStatus.UP_TO_DATE:
+            self._replace_update_toast(
+                show_up_to_date_toast(
+                    local_version=result.local_version or APP_VERSION,
+                    app_icon=self.app_icon,
+                )
+            )
+        else:
+            self._replace_update_toast(
+                show_update_check_failed_toast(app_icon=self.app_icon)
+            )
+
+    def _replace_update_toast(self, toast):
+        """Keeps a single toast alive so Python GC does not dismiss it early."""
+        previous = self._update_toast
+        self._update_toast = toast
+        if previous is not None and previous is not toast:
+            previous.close()
+            previous.deleteLater()
+
     def _show_about_dialog(self):
         """Displays the 'About' dialog."""
         dialog = QDialog(self)
@@ -960,10 +1205,15 @@ class MainWidget(QWidget):
         """
         self._is_quitting = True
         self.network.timer.stop()
+        if hasattr(self, 'world_clock'):
+            self.world_clock.stop_timers()
         if hasattr(self, 'tray_tooltip_timer'):
             self.tray_tooltip_timer.stop()
         if IS_WINDOWS and hasattr(self, 'on_top_timer'):
             self.on_top_timer.stop()
+        if self._update_toast is not None:
+            self._update_toast.close()
+            self._update_toast = None
         if self.tray_icon:
             self.tray_icon.hide()
         self.save_config()
