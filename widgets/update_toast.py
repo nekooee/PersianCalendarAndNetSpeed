@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
 INFO_TOAST_MS = 12_000
 FAILED_TOAST_MS = 14_000
 
+# Shown in toast titles so the user knows which tray app the notice belongs to.
+APP_DISPLAY_NAME = "ویجت تاریخ شمسی"
+
 
 class UpdateToast(QWidget):
     """Compact card toast with an X close control and optional primary action."""
@@ -225,9 +228,9 @@ def show_update_available_toast(
 ) -> UpdateToast:
     # Stays until the user closes it or opens the release page (no auto-dismiss).
     toast = UpdateToast(
-        title="نسخه جدید آماده است",
+        title=f"به‌روزرسانی «{APP_DISPLAY_NAME}»",
         body_html=(
-            f"نسخه <b>{remote_version}</b> منتشر شده است "
+            f"نسخه جدید <b>{remote_version}</b> برای این برنامه منتشر شده است "
             f"(نسخه فعلی شما: {local_version}). "
             f'<a href="{release_url}">برای دریافت به‌روزرسانی اینجا کلیک کنید</a>.'
         ),
@@ -250,7 +253,7 @@ def show_up_to_date_toast(
     parent=None,
 ) -> UpdateToast:
     toast = UpdateToast(
-        title="برنامه به‌روز است",
+        title=f"«{APP_DISPLAY_NAME}» به‌روز است",
         body_html=f"شما آخرین نسخه را دارید (نسخه {local_version}).",
         app_icon=app_icon,
         parent=parent,
@@ -262,7 +265,7 @@ def show_up_to_date_toast(
 
 def show_update_check_failed_toast(*, app_icon=None, parent=None) -> UpdateToast:
     toast = UpdateToast(
-        title="بررسی به‌روزرسانی انجام نشد",
+        title=f"بررسی به‌روزرسانی «{APP_DISPLAY_NAME}» انجام نشد",
         body_html=(
             "در حال حاضر امکان ارتباط با گیت‌هاب وجود ندارد. "
             "لطفاً اتصال اینترنت را بررسی کنید و دوباره تلاش کنید."
